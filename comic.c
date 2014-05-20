@@ -36,28 +36,31 @@
 
 
 typedef union {
-	int i;
-	unsigned int ui;
-	float f;
-	const void *v;
+    int i;
+    unsigned int ui;
+    float f;
+    const void *v;
 } Arg;
 
 typedef struct {
-	unsigned int mod;
-	KeySym keysym;
-	void (*func)(const Arg *);
-	const Arg arg;
+    unsigned int mod;
+    KeySym keysym;
+    void (*func)(const Arg *);
+    const Arg arg;
 } Key;
 
 typedef struct Client Client;
 struct Client {
-	const char *filename;
-	struct archive *a;
-	struct archive_entry *entry;
+    const char *filename;
+    struct archive *a;
+    struct archive_entry *entry;
 
     XImage *img;
     int imageWidth;
     int imageHeight;
+
+    int width;
+    int height;
 
 };
 
@@ -87,53 +90,57 @@ static int64_t curusec(void);
 static void quit(const Arg *arg);
 static void next(const Arg *arg);
 
-static void keypress(XEvent *e);
 static void loadnext(void);
 static void setup(void);
 static void run(void);
 static void cleanup(void);
 static void render(void);
+
+static void configurenotify(XEvent *e);
 static void expose(XEvent *e);
+static void keypress(XEvent *e);
 
 /* configuration, allows nested code to access above variables */
 #include "config.h"
 
 static void (*handler[LASTEvent]) (XEvent *) = {
-	/*
-	[ButtonPress] = buttonpress,
-	[ClientMessage] = clientmessage,
-	[ConfigureRequest] = configurerequest,
-	[ConfigureNotify] = configurenotify,
-	[DestroyNotify] = destroynotify,
-	[EnterNotify] = enternotify,
-	*/
-	[Expose] = expose,
-	[KeyPress] = keypress,
-	/*
-	[MappingNotify] = mappingnotify,
-	[MapRequest] = maprequest,
-	[MotionNotify] = motionnotify,
-	[PropertyNotify] = propertynotify,
-	[UnmapNotify] = unmapnotify
-	*/
+    /*
+    [ButtonPress] = buttonpress,
+    [ClientMessage] = clientmessage,
+    [ConfigureRequest] = configurerequest,
+    */
+    [ConfigureNotify] = configurenotify,
+    /*
+    [DestroyNotify] = destroynotify,
+    [EnterNotify] = enternotify,
+    */
+    [Expose] = expose,
+    [KeyPress] = keypress,
+    /*
+    [MappingNotify] = mappingnotify,
+    [MapRequest] = maprequest,
+    [MotionNotify] = motionnotify,
+    [PropertyNotify] = propertynotify,
+    [UnmapNotify] = unmapnotify
+    */
 };
 
 
 static void
 die(const char *errstr, ...) {
-	va_list ap;
+    va_list ap;
 
-	va_start(ap, errstr);
-	vfprintf(stderr, errstr, ap);
-	va_end(ap);
-	exit(EXIT_FAILURE);
+    va_start(ap, errstr);
+    vfprintf(stderr, errstr, ap);
+    va_end(ap);
+    exit(EXIT_FAILURE);
 }
 
 int64_t
 curusec(void) {
-	struct timeval tv;
-	gettimeofday(&tv, NULL);
-	return (tv.tv_sec * 1000 * 1000) + tv.tv_usec;
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (tv.tv_sec * 1000 * 1000) + tv.tv_usec;
 }
 
 int
@@ -190,30 +197,30 @@ decode_jpeg (void *buf, size_t size, int *widthPtr, int *heightPtr) {
     }
 
 
-	printf("bytesPerPix: %d\n", bytesPerPix);
+    printf("bytesPerPix: %d\n", bytesPerPix);
     if (3 == bytesPerPix) {
         int lineOffset = (*widthPtr * 3);
         int y;
-		unsigned char *base = retBuf;
+        unsigned char *base = retBuf;
         for (y = 0; y < cinfo.output_height; ++y) {
             jpeg_read_scanlines (&cinfo, lineBuf, 1);
-			memcpy(base, *lineBuf, lineOffset);
-			base += lineOffset;
+            memcpy(base, *lineBuf, lineOffset);
+            base += lineOffset;
         }
     } else if (1 == bytesPerPix) {
         unsigned int col;
         int width = *widthPtr;
         int x, y;
 
-		unsigned char * base = retBuf;
+        unsigned char * base = retBuf;
         for (y = 0; y < cinfo.output_height; ++y) {
             jpeg_read_scanlines (&cinfo, lineBuf, 1);
 
             for (x = 0; x < width; ++x) {
                 col = lineBuf[0][x];
 
-				memset(base, col, 3);
-				base += 3;
+                memset(base, col, 3);
+                base += 3;
             }
         }
     } else {
@@ -229,41 +236,41 @@ decode_jpeg (void *buf, size_t size, int *widthPtr, int *heightPtr) {
 
 void
 loadnext(void) {
-	int res = archive_read_next_header(c.a, &c.entry);
-	if(res == ARCHIVE_EOF)
-		return;
+    int res = archive_read_next_header(c.a, &c.entry);
+    if(res == ARCHIVE_EOF)
+        return;
 
-	uint64_t start, end;
-	
-	if(res != ARCHIVE_OK)
-		die("Failed to read archive: %s", archive_error_string(c.a));
+    uint64_t start;
 
-	const char * name = archive_entry_pathname(c.entry);
-	size_t size = archive_entry_size(c.entry);
-	printf("%s %lu\n", name, size);
+    if(res != ARCHIVE_OK)
+        die("Failed to read archive: %s", archive_error_string(c.a));
 
-	char * data = malloc(size);
-	size_t read = archive_read_data(c.a, data, size);
-	if(read != size)
-		die("Failed to read whole: %lu != %lu", read, size);
+    const char * name = archive_entry_pathname(c.entry);
+    size_t size = archive_entry_size(c.entry);
+    printf("%s %lu\n", name, size);
 
-	u_char *buf;
-	start = curusec();
-	buf = decode_jpeg(data, size, &c.imageWidth, &c.imageHeight);
-	printf("decode_jpeg() %d us\n", curusec() - start);
+    char * data = malloc(size);
+    size_t read = archive_read_data(c.a, data, size);
+    if(read != size)
+        die("Failed to read whole: %lu != %lu", read, size);
+
+    u_char *buf;
+    start = curusec();
+    buf = decode_jpeg(data, size, &c.imageWidth, &c.imageHeight);
+    printf("decode_jpeg() %d us\n", curusec() - start);
     if (!buf)
         die("Unable to decode JPEG");
-	free(data);
+    free(data);
 
-	start = curusec();
+    start = curusec();
 
-	if(c.img)
-		XDestroyImage(c.img);
+    if(c.img)
+        XDestroyImage(c.img);
 
     c.img = create_image_from_buffer(buf, c.imageWidth, c.imageHeight);
-	printf("create_image_from_buffer() %d us\n", curusec() - start);
+    printf("create_image_from_buffer() %d us\n", curusec() - start);
     if (!c.img)
-		die("Failed to create image");
+        die("Failed to create image");
 
     free (buf);
 }
@@ -300,7 +307,7 @@ create_image_from_buffer (unsigned char *buf, int width, int height) {
 
             newBuf[outIndex] = r | g | b;
             ++outIndex;
-		}
+        }
 
         img = XCreateImage (dpy,
             CopyFromParent, depth,
@@ -382,102 +389,117 @@ create_window (Display *dpy, int screen, int x, int y, int width, int height) {
 
 void
 render(void) {
-	XPutImage (dpy, win, gc, c.img, 0, 0, 0, 0, c.imageWidth, c.imageHeight);
-	XFlush (dpy);
+    XClearArea(dpy, win, 0, 0, 0, 0, False);
+    XPutImage (dpy, win, gc, c.img, 0, 0,
+        (c.width - c.imageWidth) / 2,
+        (c.height - c.imageHeight) / 2,
+        c.imageWidth, c.imageHeight);
+    XFlush (dpy);
+}
+
+void
+configurenotify(XEvent *e) {
+    XConfigureEvent xce = e->xconfigure;
+
+    if(c.width != xce.width || c.height != xce.height) {
+        c.width = xce.width;
+        c.height = xce.height;
+        render();
+    }
 }
 
 void
 expose(XEvent *e) {
-	XExposeEvent *ev = &e->xexpose;
+    XExposeEvent *ev = &e->xexpose;
 
-	if(ev->count == 0) {
-		render();
-	}
+    if(ev->count == 0) {
+        render();
+    }
 }
 
 void
 run(void) {
-	XEvent ev;
-	/* main event loop */
-	XSync(dpy, False);
-	while(running && !XNextEvent(dpy, &ev)) {
-		printf("event:%d\n", ev.type);
-		if(handler[ev.type])
-			handler[ev.type](&ev); /* call handler */
-	}
+    XEvent ev;
+    /* main event loop */
+    XSync(dpy, False);
+    while(running && !XNextEvent(dpy, &ev)) {
+        printf("event:%d\n", ev.type);
+        if(handler[ev.type])
+            handler[ev.type](&ev); /* call handler */
+    }
 }
 
 void
 cleanup(void) {
-	archive_read_free(c.a);
+    archive_read_free(c.a);
 }
 
 void
 quit(const Arg *arg) {
-	running = False;
+    running = False;
 }
 
 void
 next(const Arg *arg) {
-	uint64_t start, end;
-	start = curusec();
-	loadnext();
-	printf("loadnext() %dus\n", curusec() - start);
+    uint64_t start, end;
+    start = curusec();
+    loadnext();
+    printf("loadnext() %luus\n", curusec() - start);
 
-	start = curusec();
-	render();
-	printf("render() %dus\n", curusec() - start);
+    start = curusec();
+    render();
+    printf("render() %luus\n", curusec() - start);
 }
 
 void
 keypress(XEvent *e) {
-	unsigned int i;
-	KeySym keysym;
-	XKeyEvent *ev;
+    unsigned int i;
+    KeySym keysym;
+    XKeyEvent *ev;
 
-	ev = &e->xkey;
-	keysym = XKeycodeToKeysym(dpy, (KeyCode)ev->keycode, 0);
-	for(i = 0; i < LENGTH(keys); i++)
-		if(keysym == keys[i].keysym
-		&& CLEANMASK(keys[i].mod) == CLEANMASK(ev->state)
-		&& keys[i].func)
-			keys[i].func(&(keys[i].arg));
+    ev = &e->xkey;
+    keysym = XKeycodeToKeysym(dpy, (KeyCode)ev->keycode, 0);
+    for(i = 0; i < LENGTH(keys); i++)
+        if(keysym == keys[i].keysym
+        && CLEANMASK(keys[i].mod) == CLEANMASK(ev->state)
+        && keys[i].func)
+            keys[i].func(&(keys[i].arg));
 }
 
 void
 setup(void) {
     dpy = XOpenDisplay(NULL);
-	screen = DefaultScreen(dpy);
+    screen = DefaultScreen(dpy);
     win = create_window (dpy, screen, 0, 0, 10, 10);
     gc = XCreateGC (dpy, win, 0, NULL);
 
-	c.a = archive_read_new();
-	archive_read_support_filter_all(c.a);
-	archive_read_support_format_all(c.a);
-	if(archive_read_open_filename(c.a, c.filename, 10240) != ARCHIVE_OK)
-		die("Failed to open archive: %s", archive_error_string(c.a));
+    c.a = archive_read_new();
+    archive_read_support_filter_all(c.a);
+    archive_read_support_format_all(c.a);
+    if(archive_read_open_filename(c.a, c.filename, 10240) != ARCHIVE_OK)
+        die("Failed to open archive: %s", archive_error_string(c.a));
 
     XMapRaised (dpy, win);
-    XSelectInput(dpy, win, ExposureMask | KeyPressMask);
+    XSelectInput(dpy, win, ExposureMask | StructureNotifyMask | KeyPressMask);
 }
 
 int
 main(int argc, char *argv[]) {
-	/* command line args */
-	ARGBEGIN {
-	default:
-		break;
-	} ARGEND;
+    /* command line args */
+    ARGBEGIN {
+    default:
+        break;
+    } ARGEND;
 
-	if(argc == 0)
-		die("No filename specified");
-	c.filename = argv[0];
-	
-	setup();
-	// Populate first image
-	loadnext();
-	run();
-	cleanup();
-    
+    if(argc == 0)
+        die("No filename specified");
+    c.filename = argv[0];
+
+    setup();
+    // Populate first image
+    loadnext();
+    run();
+    cleanup();
+
     return EXIT_SUCCESS;
 }
