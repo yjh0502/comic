@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <sys/time.h>
+#include <string.h>
 
 #include <X11/cursorfont.h>
 #include <X11/keysym.h>
@@ -55,12 +57,11 @@ struct Client {
     struct archive *a;
     struct archive_entry *entry;
 
+    int screenWidth, screenHeight;
+    unsigned char *buf;
+    int width, height;
     XImage *img;
-    int imageWidth;
-    int imageHeight;
-
-    int width;
-    int height;
+    int imageWidth, imageHeight;
 
 };
 
@@ -81,7 +82,7 @@ static void jpeg_error_exit (j_common_ptr cinfo);
 
 unsigned char * list(char *filename, int *widthPtr, int *heightPtr);
 static unsigned char * decode_jpeg(void *buf, size_t size, int *widthPtr, int *heightPtr);
-static XImage *create_image_from_buffer(unsigned char *buf, int width, int height);
+static XImage *create_image_from_buffer(unsigned char *buf, int width, int height, int targetWidth, int targetHeight);
 
 static Window create_window(Display *dpy, int screen, int x, int y, int width, int height);
 
@@ -196,7 +197,6 @@ decode_jpeg (void *buf, size_t size, int *widthPtr, int *heightPtr) {
         return NULL;
     }
 
-
     printf("bytesPerPix: %d\n", bytesPerPix);
     if (3 == bytesPerPix) {
         int lineOffset = (*widthPtr * 3);
@@ -254,29 +254,17 @@ loadnext(void) {
     if(read != size)
         die("Failed to read whole: %lu != %lu", read, size);
 
-    u_char *buf;
+    free(c.buf);
     start = curusec();
-    buf = decode_jpeg(data, size, &c.imageWidth, &c.imageHeight);
-    printf("decode_jpeg() %d us\n", curusec() - start);
-    if (!buf)
+    c.buf = decode_jpeg(data, size, &c.width, &c.height);
+    printf("decode_jpeg() %ld us\n", curusec() - start);
+    if (!c.buf)
         die("Unable to decode JPEG");
     free(data);
-
-    start = curusec();
-
-    if(c.img)
-        XDestroyImage(c.img);
-
-    c.img = create_image_from_buffer(buf, c.imageWidth, c.imageHeight);
-    printf("create_image_from_buffer() %d us\n", curusec() - start);
-    if (!c.img)
-        die("Failed to create image");
-
-    free (buf);
 }
 
 static XImage *
-create_image_from_buffer (unsigned char *buf, int width, int height) {
+create_image_from_buffer (unsigned char *buf, int width, int height, int targetWidth, int targetHeight) {
     int depth;
     XImage *img = NULL;
     Visual *vis;
@@ -296,57 +284,39 @@ create_image_from_buffer (unsigned char *buf, int width, int height) {
 
 
     if (depth >= 24) {
-        size_t numNewBufBytes = (4 * (width * height));
+        size_t numNewBufBytes = (4 * (targetWidth * targetHeight));
         u_int32_t *newBuf = malloc (numNewBufBytes);
 
-        for (i = 0; i < numBufBytes; i += 3) {
-            unsigned int r, g, b;
-            r = (buf[i] << 16);
-            g = (buf[i+1] << 8);
-            b = (buf[i+2]);
+        int x, y;
+        // Nearest sampling
+        for(y = 0; y < targetHeight; y++) {
+            int sampleY = y * height / targetHeight;
+            for(x = 0; x < targetWidth; x++) {
+                int sampleX = x * width / targetWidth;
 
-            newBuf[outIndex] = r | g | b;
-            ++outIndex;
+                int i = (sampleY * width + sampleX) * 3;
+
+                unsigned int r, g, b;
+                r = (buf[i] << 16);
+                g = (buf[i+1] << 8);
+                b = (buf[i+2]);
+
+                newBuf[outIndex] = r | g | b;
+                ++outIndex;
+            }
         }
 
         img = XCreateImage (dpy,
             CopyFromParent, depth,
             ZPixmap, 0,
             (char *) newBuf,
-            width, height,
+            targetWidth, targetHeight,
             32, 0
         );
 
-    } else if (depth >= 15) {
-        size_t numNewBufBytes = (2 * (width * height));
-        u_int16_t *newBuf = malloc (numNewBufBytes);
-
-        for (i = 0; i < numBufBytes; ++i) {
-            unsigned int r, g, b;
-
-            r = (buf[i] * rRatio);
-            ++i;
-            g = (buf[i] * gRatio);
-            ++i;
-            b = (buf[i] * bRatio);
-
-            r &= vis->red_mask;
-            g &= vis->green_mask;
-            b &= vis->blue_mask;
-
-            newBuf[outIndex] = r | g | b;
-            ++outIndex;
-        }
-
-        img = XCreateImage (dpy,
-            CopyFromParent, depth,
-            ZPixmap, 0,
-            (char *) newBuf,
-            width, height,
-            16, 0
-        );
     } else {
-        fprintf (stderr, "This program does not support dpyplays with a depth less than 15.");
+        die("This program does not support displays "
+            "with a depth less than 24.");
         return NULL;
     }
 
@@ -389,10 +359,31 @@ create_window (Display *dpy, int screen, int x, int y, int width, int height) {
 
 void
 render(void) {
+    if(c.img)
+        XDestroyImage(c.img);
+
+    double ratio = (double)c.width / c.height;
+    double screenRatio = (double)c.screenWidth / c.screenHeight;
+
+    if(ratio > screenRatio) {
+        c.imageWidth = c.screenWidth;
+        c.imageHeight = c.height * c.screenWidth / c.width;
+    } else {
+        c.imageWidth = c.width * c.screenHeight / c.height;
+        c.imageHeight = c.screenHeight;
+    }
+
+    int64_t start = curusec();
+    c.img = create_image_from_buffer(c.buf, c.width, c.height,
+        c.imageWidth, c.imageHeight);
+    printf("create_image_from_buffer() %ld us\n", curusec() - start);
+    if (!c.img)
+        die("Failed to create image");
+
     XClearArea(dpy, win, 0, 0, 0, 0, False);
     XPutImage (dpy, win, gc, c.img, 0, 0,
-        (c.width - c.imageWidth) / 2,
-        (c.height - c.imageHeight) / 2,
+        (c.screenWidth - c.imageWidth) / 2,
+        (c.screenHeight - c.imageHeight) / 2,
         c.imageWidth, c.imageHeight);
     XFlush (dpy);
 }
@@ -401,9 +392,10 @@ void
 configurenotify(XEvent *e) {
     XConfigureEvent xce = e->xconfigure;
 
-    if(c.width != xce.width || c.height != xce.height) {
-        c.width = xce.width;
-        c.height = xce.height;
+    if(c.screenWidth != xce.width || c.screenHeight != xce.height) {
+        c.screenWidth = xce.width;
+        c.screenHeight = xce.height;
+        printf("w:%d, h:%d\n", c.screenWidth, c.screenHeight);
         render();
     }
 }
@@ -422,11 +414,9 @@ run(void) {
     XEvent ev;
     /* main event loop */
     XSync(dpy, False);
-    while(running && !XNextEvent(dpy, &ev)) {
-        printf("event:%d\n", ev.type);
+    while(running && !XNextEvent(dpy, &ev))
         if(handler[ev.type])
             handler[ev.type](&ev); /* call handler */
-    }
 }
 
 void
@@ -441,7 +431,7 @@ quit(const Arg *arg) {
 
 void
 next(const Arg *arg) {
-    uint64_t start, end;
+    uint64_t start;
     start = curusec();
     loadnext();
     printf("loadnext() %luus\n", curusec() - start);
@@ -470,7 +460,7 @@ void
 setup(void) {
     dpy = XOpenDisplay(NULL);
     screen = DefaultScreen(dpy);
-    win = create_window (dpy, screen, 0, 0, 10, 10);
+    win = create_window (dpy, screen, 0, 0, 800, 600);
     gc = XCreateGC (dpy, win, 0, NULL);
 
     c.a = archive_read_new();
@@ -496,7 +486,6 @@ main(int argc, char *argv[]) {
     c.filename = argv[0];
 
     setup();
-    // Populate first image
     loadnext();
     run();
     cleanup();
