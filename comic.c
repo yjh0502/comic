@@ -267,22 +267,9 @@ static XImage *
 create_image_from_buffer (unsigned char *buf, int width, int height, int targetWidth, int targetHeight) {
     int depth;
     XImage *img = NULL;
-    Visual *vis;
-    double rRatio;
-    double gRatio;
-    double bRatio;
     int outIndex = 0;
-    int i;
-    int numBufBytes = (3 * (width * height));
 
     depth = DefaultDepth (dpy, screen);
-    vis = DefaultVisual (dpy, screen);
-
-    rRatio = vis->red_mask / 255.0;
-    gRatio = vis->green_mask / 255.0;
-    bRatio = vis->blue_mask / 255.0;
-
-
     if (depth >= 24) {
         size_t numNewBufBytes = (4 * (targetWidth * targetHeight));
         u_int32_t *newBuf = malloc (numNewBufBytes);
@@ -421,7 +408,13 @@ run(void) {
 
 void
 cleanup(void) {
+    XDestroyImage(c.img);
+    free(c.buf);
+
     archive_read_free(c.a);
+    XFreeGC(dpy, gc);
+    XDestroyWindow(dpy, win);
+    XCloseDisplay(dpy);
 }
 
 void
