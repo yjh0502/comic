@@ -32,4 +32,16 @@ clean:
 	@echo cleaning
 	@rm -f comic ${OBJ}
 
+install: all
+	@echo installing executables to ${DESTDIR}${PREFIX}/bin
+	@mkdir -p ${DESTDIR}${PREFIX}/bin
+	@cp -f comic comic_dir.sh ${DESTDIR}${PREFIX}/bin
+	@chmod 755 ${DESTDIR}${PREFIX}/bin/comic
+	@chmod 755 ${DESTDIR}${PREFIX}/bin/comic_dir.sh
+
+uninstall:
+	@echo removing executables from ${DESTDIR}${PREFIX}/bin
+	@rm -f ${DESTDIR}${PREFIX}/bin/comic
+	@rm -f ${DESTDIR}${PREFIX}/bin/comic_dir.sh
+
 .PHONY: all options clean

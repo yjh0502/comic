@@ -1,12 +1,14 @@
 #include "arg.h"
 
-#include <stdlib.h>
-#include <stdio.h>
+#include <archive_entry.h>
+#include <archive.h>
+#include <errno.h>
 #include <stdarg.h>
 #include <stdbool.h>
-#include <sys/time.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-
+#include <sys/time.h>
 #include <X11/cursorfont.h>
 #include <X11/keysym.h>
 #include <X11/Xatom.h>
@@ -14,8 +16,6 @@
 #include <X11/Xproto.h>
 #include <X11/Xutil.h>
 
-#include <archive.h>
-#include <archive_entry.h>
 #include <jpeglib.h>
 #include <jerror.h>
 
@@ -26,9 +26,6 @@
 #define MIN(A, B)               ((A) < (B) ? (A) : (B))
 #define LENGTH(X)               (sizeof X / sizeof X[0])
 #define MOUSEMASK               (BUTTONMASK|PointerMotionMask)
-
-
-
 
 typedef union {
     int i;
@@ -126,7 +123,6 @@ static void (*handler[LASTEvent]) (XEvent *) = {
     */
 };
 
-
 void
 die(const char *errstr, ...) {
     va_list ap;
@@ -212,15 +208,23 @@ decodejpeg (void *buf, size_t size, int *widthPtr, int *heightPtr) {
 void
 loadnext(void) {
     char *data;
-    size_t size;
+    size_t size, read;
 
     if(archive_read_next_header(c.a, &c.entry) != ARCHIVE_OK)
         die("Failed to read archive: %s\n", archive_error_string(c.a));
 
+    printf("%s\n", archive_entry_pathname(c.entry));
+    if(archive_entry_filetype(c.entry) & AE_IFDIR) {
+        ++c.idx;
+        return;
+    }
+
     size = archive_entry_size(c.entry);
     data = malloc(size);
-    if(archive_read_data(c.a, data, size) != size)
-        die("Failed to read whole");
+    if((read = archive_read_data(c.a, data, size)) != size)
+        die("Failed to read whole %d != %d, %s, %s, %s\n", read, size,
+            archive_entry_pathname(c.entry),
+            archive_error_string(c.a), strerror(errno));
 
     free(c.buf);
     c.buf = decodejpeg(data, size, &c.width, &c.height);
@@ -289,6 +293,9 @@ void
 render(void) {
     if(c.img)
         XDestroyImage(c.img);
+
+    if(!c.width || !c.height)
+        return;
 
     double ratio = (double)c.width / c.height;
     double screenRatio = (double)c.screenWidth / c.screenHeight;
