@@ -22,6 +22,8 @@
 /* macros */
 #define BUTTONMASK              (ButtonPressMask|ButtonReleaseMask)
 #define CLEANMASK(mask)         (mask & ~(LockMask) & (ShiftMask|ControlMask|Mod1Mask|Mod2Mask|Mod3Mask|Mod4Mask|Mod5Mask))
+#define MAX(A, B)               ((A) > (B) ? (A) : (B))
+#define MIN(A, B)               ((A) < (B) ? (A) : (B))
 #define LENGTH(X)               (sizeof X / sizeof X[0])
 #define MOUSEMASK               (BUTTONMASK|PointerMotionMask)
 
@@ -52,6 +54,8 @@ typedef struct {
 typedef struct Client Client;
 struct Client {
     const char *filename;
+
+    int idx, count;
     struct archive *a;
     struct archive_entry *entry;
 
@@ -78,10 +82,10 @@ static void jpegerrorexit (j_common_ptr ci);
 static unsigned char * decodejpeg(void *buf, size_t size, int *w, int *h);
 static XImage *createimage(unsigned char *buf, int w, int h, int target_w, int target_h);
 static Window createwindow(Display *dpy, int screen, int x, int y, int w, int h);
-
-static int64_t curusec(void);
+static struct archive * openarchive(const char *filename);
 
 static void quit(const Arg *arg);
+static void prev(const Arg *arg);
 static void next(const Arg *arg);
 
 static void loadnext(void);
@@ -130,13 +134,6 @@ die(const char *errstr, ...) {
     vfprintf(stderr, errstr, ap);
     va_end(ap);
     exit(EXIT_FAILURE);
-}
-
-int64_t
-curusec(void) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (tv.tv_sec * 1000 * 1000) + tv.tv_usec;
 }
 
 void
@@ -235,6 +232,8 @@ loadnext(void) {
     if (!c.buf)
         die("Unable to decode JPEG\n");
     free(data);
+
+    ++c.idx;
 }
 
 XImage *
@@ -379,15 +378,40 @@ quit(const Arg *arg) {
 }
 
 void
-next(const Arg *arg) {
-    uint64_t start;
-    start = curusec();
-    loadnext();
-    printf("loadnext() %luus\n", curusec() - start);
+prev(const Arg *arg) {
+    int advance;
+    struct archive_entry *entry;
 
-    start = curusec();
+    archive_read_free(c.a);
+    c.a = openarchive(c.filename);
+
+    advance = c.idx - arg->i;
+    c.idx = 0;
+    while(--advance > 0) {
+        if(archive_read_next_header(c.a, &entry) != ARCHIVE_OK)
+            die("Failed to seek archive");
+        ++c.idx;
+    }
+
+    loadnext();
     render();
-    printf("render() %luus\n", curusec() - start);
+}
+
+void
+next(const Arg *arg) {
+    int advance;
+    if(c.idx == c.count)
+        return;
+
+    advance = MIN(arg->i, c.count - c.idx);
+    while(--advance > 0) {
+        ++c.idx;
+        if(archive_read_next_header(c.a, &c.entry) != ARCHIVE_OK)
+            die("Failed to seek archive");
+    }
+
+    loadnext();
+    render();
 }
 
 void
@@ -405,6 +429,18 @@ keypress(XEvent *e) {
             keys[i].func(&(keys[i].arg));
 }
 
+struct archive *
+openarchive(const char *filename) {
+    struct archive *a;
+    a = archive_read_new();
+    archive_read_support_filter_all(a);
+    archive_read_support_format_all(a);
+    if(archive_read_open_filename(a, c.filename, 10240) != ARCHIVE_OK)
+        die("Failed to open archive: %s\n", archive_error_string(a));
+
+    return a;
+}
+
 void
 setup(void) {
     dpy = XOpenDisplay(NULL);
@@ -415,11 +451,16 @@ setup(void) {
     if(DefaultDepth(dpy, screen) < 24)
         die("This program does not support displays with a depth less than 24\n");
 
-    c.a = archive_read_new();
-    archive_read_support_filter_all(c.a);
-    archive_read_support_format_all(c.a);
-    if(archive_read_open_filename(c.a, c.filename, 10240) != ARCHIVE_OK)
-        die("Failed to open archive: %s\n", archive_error_string(c.a));
+    struct archive *a;
+    struct archive_entry *entry;
+
+    a = openarchive(c.filename);
+    while(archive_read_next_header(a, &entry) == ARCHIVE_OK)
+        ++c.count;
+    archive_read_free(a);
+
+    c.a = openarchive(c.filename);
+    c.idx = 0;
 
     XMapRaised(dpy, win);
     XSelectInput(dpy, win, ExposureMask | StructureNotifyMask | KeyPressMask | MOUSEMASK);
