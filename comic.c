@@ -94,6 +94,7 @@ static void usage(void);
 static void run(void);
 static void cleanup(void);
 static void render(void);
+static void xsettitle(Window w, const char *str);
 
 static void buttonpress(XEvent *e);
 static void configurenotify(XEvent *e);
@@ -208,24 +209,18 @@ decodejpeg (void *buf, size_t size, int *widthPtr, int *heightPtr) {
     return retBuf;
 }
 
-
 void
 loadnext(void) {
-    int res = archive_read_next_header(c.a, &c.entry);
-    if(res == ARCHIVE_EOF)
-        return;
+    char *data;
+    size_t size;
 
-    if(res != ARCHIVE_OK)
+    if(archive_read_next_header(c.a, &c.entry) != ARCHIVE_OK)
         die("Failed to read archive: %s\n", archive_error_string(c.a));
 
-    const char * name = archive_entry_pathname(c.entry);
-    size_t size = archive_entry_size(c.entry);
-    printf("%s %lu\n", name, size);
-
-    char * data = malloc(size);
-    size_t read = archive_read_data(c.a, data, size);
-    if(read != size)
-        die("Failed to read whole: %lu != %lu\n", read, size);
+    size = archive_entry_size(c.entry);
+    data = malloc(size);
+    if(archive_read_data(c.a, data, size) != size)
+        die("Failed to read whole");
 
     free(c.buf);
     c.buf = decodejpeg(data, size, &c.width, &c.height);
@@ -317,6 +312,11 @@ render(void) {
         (c.screenHeight - c.image_height) / 2,
         c.image_width, c.image_height);
     XFlush (dpy);
+
+    char title[1024];
+    snprintf(title, 1024, "%s (%d/%d): %s", c.filename, c.idx, c.count,
+        archive_entry_pathname(c.entry));
+    xsettitle(win, title);
 }
 
 void
@@ -427,6 +427,17 @@ keypress(XEvent *e) {
         && CLEANMASK(keys[i].mod) == CLEANMASK(ev->state)
         && keys[i].func)
             keys[i].func(&(keys[i].arg));
+}
+
+void
+xsettitle(Window w, const char *str) {
+	XTextProperty xtp;
+
+	if(XmbTextListToTextProperty(dpy, (char **)&str, 1, XCompoundTextStyle,
+				&xtp) == Success) {
+		XSetTextProperty(dpy, w, &xtp, XA_WM_NAME);
+		XFree(xtp.value);
+	}
 }
 
 struct archive *
