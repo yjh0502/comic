@@ -20,18 +20,13 @@
 #include <jerror.h>
 
 /* macros */
-#define BUTTONMASK              (ButtonPressMask|ButtonReleaseMask)
 #define CLEANMASK(mask)         (mask & ~(LockMask) & (ShiftMask|ControlMask|Mod1Mask|Mod2Mask|Mod3Mask|Mod4Mask|Mod5Mask))
 #define MAX(A, B)               ((A) > (B) ? (A) : (B))
 #define MIN(A, B)               ((A) < (B) ? (A) : (B))
 #define LENGTH(X)               (sizeof X / sizeof X[0])
-#define MOUSEMASK               (BUTTONMASK|PointerMotionMask)
 
 typedef union {
     int i;
-    unsigned int ui;
-    float f;
-    const void *v;
 } Arg;
 
 typedef struct {
@@ -61,7 +56,6 @@ struct Client {
     int width, height;
     XImage *img;
     int image_width, image_height;
-
 };
 
 static Client c;
@@ -103,24 +97,9 @@ static void keypress(XEvent *e);
 
 static void (*handler[LASTEvent]) (XEvent *) = {
     [ButtonPress] = buttonpress,
-    /*
-    [ClientMessage] = clientmessage,
-    [ConfigureRequest] = configurerequest,
-    */
     [ConfigureNotify] = configurenotify,
-    /*
-    [DestroyNotify] = destroynotify,
-    [EnterNotify] = enternotify,
-    */
     [Expose] = expose,
     [KeyPress] = keypress,
-    /*
-    [MappingNotify] = mappingnotify,
-    [MapRequest] = maprequest,
-    [MotionNotify] = motionnotify,
-    [PropertyNotify] = propertynotify,
-    [UnmapNotify] = unmapnotify
-    */
 };
 
 void
@@ -266,6 +245,7 @@ createimage(unsigned char *buf, int w, int h, int target_w, int target_h) {
     XInitImage (img);
     img->byte_order = LSBFirst;
     img->bitmap_bit_order = MSBFirst;
+
     return img;
 }
 
@@ -481,7 +461,7 @@ setup(void) {
     c.idx = 0;
 
     XMapRaised(dpy, win);
-    XSelectInput(dpy, win, ExposureMask | StructureNotifyMask | KeyPressMask | MOUSEMASK);
+    XSelectInput(dpy, win, ExposureMask | StructureNotifyMask | KeyPressMask | ButtonPressMask);
 
     loadnext();
 }
