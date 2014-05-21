@@ -1,3 +1,4 @@
 comic
+config.h
 *.o
 *.zip

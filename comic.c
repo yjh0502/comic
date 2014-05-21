@@ -22,17 +22,8 @@
 /* macros */
 #define BUTTONMASK              (ButtonPressMask|ButtonReleaseMask)
 #define CLEANMASK(mask)         (mask & ~(LockMask) & (ShiftMask|ControlMask|Mod1Mask|Mod2Mask|Mod3Mask|Mod4Mask|Mod5Mask))
-#define INTERSECT(x,y,w,h,m)    (MAX(0, MIN((x)+(w),(m)->wx+(m)->ww) - MAX((x),(m)->wx)) \
-                               * MAX(0, MIN((y)+(h),(m)->wy+(m)->wh) - MAX((y),(m)->wy)))
-#define ISVISIBLE(C)            ((C->tags & C->mon->tagset[C->mon->seltags]))
 #define LENGTH(X)               (sizeof X / sizeof X[0])
-#define MAX(A, B)               ((A) > (B) ? (A) : (B))
-#define MIN(A, B)               ((A) < (B) ? (A) : (B))
 #define MOUSEMASK               (BUTTONMASK|PointerMotionMask)
-#define WIDTH(X)                ((X)->w + 2 * (X)->bw)
-#define HEIGHT(X)               ((X)->h + 2 * (X)->bw)
-#define TAGMASK                 ((1 << LENGTH(tags)) - 1)
-#define TEXTW(X)                (textnw(X, strlen(X)) + dc.font.height)
 
 
 
@@ -43,6 +34,13 @@ typedef union {
     float f;
     const void *v;
 } Arg;
+
+typedef struct {
+	unsigned int mask;
+	unsigned int button;
+	void (*func)(const Arg *arg);
+	const Arg arg;
+} Button;
 
 typedef struct {
     unsigned int mod;
@@ -61,7 +59,7 @@ struct Client {
     unsigned char *buf;
     int width, height;
     XImage *img;
-    int imageWidth, imageHeight;
+    int image_width, image_height;
 
 };
 
@@ -76,15 +74,10 @@ static Bool running = True;
 char *argv0;
 
 static void die(const char *errstr, ...);
-
-static int get_byte_order (void);
-static void jpeg_error_exit (j_common_ptr cinfo);
-
-unsigned char * list(char *filename, int *widthPtr, int *heightPtr);
-static unsigned char * decode_jpeg(void *buf, size_t size, int *widthPtr, int *heightPtr);
-static XImage *create_image_from_buffer(unsigned char *buf, int width, int height, int targetWidth, int targetHeight);
-
-static Window create_window(Display *dpy, int screen, int x, int y, int width, int height);
+static void jpegerrorexit (j_common_ptr ci);
+static unsigned char * decodejpeg(void *buf, size_t size, int *w, int *h);
+static XImage *createimage(unsigned char *buf, int w, int h, int target_w, int target_h);
+static Window createwindow(Display *dpy, int screen, int x, int y, int w, int h);
 
 static int64_t curusec(void);
 
@@ -93,10 +86,12 @@ static void next(const Arg *arg);
 
 static void loadnext(void);
 static void setup(void);
+static void usage(void);
 static void run(void);
 static void cleanup(void);
 static void render(void);
 
+static void buttonpress(XEvent *e);
 static void configurenotify(XEvent *e);
 static void expose(XEvent *e);
 static void keypress(XEvent *e);
@@ -105,8 +100,8 @@ static void keypress(XEvent *e);
 #include "config.h"
 
 static void (*handler[LASTEvent]) (XEvent *) = {
-    /*
     [ButtonPress] = buttonpress,
+    /*
     [ClientMessage] = clientmessage,
     [ConfigureRequest] = configurerequest,
     */
@@ -127,7 +122,7 @@ static void (*handler[LASTEvent]) (XEvent *) = {
 };
 
 
-static void
+void
 die(const char *errstr, ...) {
     va_list ap;
 
@@ -144,31 +139,15 @@ curusec(void) {
     return (tv.tv_sec * 1000 * 1000) + tv.tv_usec;
 }
 
-int
-get_byte_order(void) {
-    union {
-        char c[sizeof(short)];
-        short s;
-    } order;
-
-    order.s = 1;
-    if ((1 == order.c[0])) {
-        return LSBFirst;
-    } else {
-        return MSBFirst;
-    }
-}
-
 void
-jpeg_error_exit (j_common_ptr cinfo) {
+jpegerrorexit (j_common_ptr cinfo) {
     cinfo->err->output_message (cinfo);
-    exit (EXIT_FAILURE);
+    die("Error on jpeg\n");
 }
-
 
 /*This returns an array for a 24 bit image.*/
-static unsigned char *
-decode_jpeg (void *buf, size_t size, int *widthPtr, int *heightPtr) {
+unsigned char *
+decodejpeg (void *buf, size_t size, int *widthPtr, int *heightPtr) {
     register JSAMPARRAY lineBuf;
     struct jpeg_decompress_struct cinfo;
     struct jpeg_error_mgr err_mgr;
@@ -176,7 +155,7 @@ decode_jpeg (void *buf, size_t size, int *widthPtr, int *heightPtr) {
     unsigned char *retBuf;
 
     cinfo.err = jpeg_std_error (&err_mgr);
-    err_mgr.error_exit = jpeg_error_exit;
+    err_mgr.error_exit = jpegerrorexit;
 
     jpeg_create_decompress (&cinfo);
     jpeg_mem_src (&cinfo, buf, size);
@@ -197,7 +176,6 @@ decode_jpeg (void *buf, size_t size, int *widthPtr, int *heightPtr) {
         return NULL;
     }
 
-    printf("bytesPerPix: %d\n", bytesPerPix);
     if (3 == bytesPerPix) {
         int lineOffset = (*widthPtr * 3);
         int y;
@@ -224,8 +202,8 @@ decode_jpeg (void *buf, size_t size, int *widthPtr, int *heightPtr) {
             }
         }
     } else {
-        fprintf (stderr, "Error: the number of color channels is %d.  This program only handles 1 or 3\n", bytesPerPix);
-        return NULL;
+        die("The number of color channels is %d."
+            "This program only handles 1 or 3\n", bytesPerPix);
     }
     jpeg_finish_decompress (&cinfo);
     jpeg_destroy_decompress (&cinfo);
@@ -240,10 +218,8 @@ loadnext(void) {
     if(res == ARCHIVE_EOF)
         return;
 
-    uint64_t start;
-
     if(res != ARCHIVE_OK)
-        die("Failed to read archive: %s", archive_error_string(c.a));
+        die("Failed to read archive: %s\n", archive_error_string(c.a));
 
     const char * name = archive_entry_pathname(c.entry);
     size_t size = archive_entry_size(c.entry);
@@ -252,93 +228,64 @@ loadnext(void) {
     char * data = malloc(size);
     size_t read = archive_read_data(c.a, data, size);
     if(read != size)
-        die("Failed to read whole: %lu != %lu", read, size);
+        die("Failed to read whole: %lu != %lu\n", read, size);
 
     free(c.buf);
-    start = curusec();
-    c.buf = decode_jpeg(data, size, &c.width, &c.height);
-    printf("decode_jpeg() %ld us\n", curusec() - start);
+    c.buf = decodejpeg(data, size, &c.width, &c.height);
     if (!c.buf)
-        die("Unable to decode JPEG");
+        die("Unable to decode JPEG\n");
     free(data);
 }
 
-static XImage *
-create_image_from_buffer (unsigned char *buf, int width, int height, int targetWidth, int targetHeight) {
-    int depth;
+XImage *
+createimage(unsigned char *buf, int w, int h, int target_w, int target_h) {
     XImage *img = NULL;
-    int outIndex = 0;
+    int i = 0, out_idx = 0;
+    int x, y, sample_x, sample_y;
+    uint32_t *image_buf;
 
-    depth = DefaultDepth (dpy, screen);
-    if (depth >= 24) {
-        size_t numNewBufBytes = (4 * (targetWidth * targetHeight));
-        u_int32_t *newBuf = malloc (numNewBufBytes);
+    image_buf = malloc (sizeof(uint32_t) * target_w* target_h);
+    // Nearest sampling
+    for(y = 0; y < target_h; y++) {
+        sample_y = y * h / target_h;
+        for(x = 0; x < target_w; x++) {
+            sample_x = x * w / target_w;
+            i = (sample_y * w + sample_x) * 3;
 
-        int x, y;
-        // Nearest sampling
-        for(y = 0; y < targetHeight; y++) {
-            int sampleY = y * height / targetHeight;
-            for(x = 0; x < targetWidth; x++) {
-                int sampleX = x * width / targetWidth;
-
-                int i = (sampleY * width + sampleX) * 3;
-
-                unsigned int r, g, b;
-                r = (buf[i] << 16);
-                g = (buf[i+1] << 8);
-                b = (buf[i+2]);
-
-                newBuf[outIndex] = r | g | b;
-                ++outIndex;
-            }
+            image_buf[out_idx] = (buf[i] << 16) | (buf[i+1] << 8) | (buf[i+2]);
+            ++out_idx;
         }
-
-        img = XCreateImage (dpy,
-            CopyFromParent, depth,
-            ZPixmap, 0,
-            (char *) newBuf,
-            targetWidth, targetHeight,
-            32, 0
-        );
-
-    } else {
-        die("This program does not support displays "
-            "with a depth less than 24.");
-        return NULL;
     }
+
+    img = XCreateImage (dpy,
+        CopyFromParent, DefaultDepth(dpy, screen),
+        ZPixmap, 0,
+        (char *) image_buf,
+        target_w, target_h,
+        32, 0
+    );
 
     XInitImage (img);
-    /*Set the client's byte order, so that XPutImage knows what to do with the data.*/
-    /*The default in a new X image is the server's format, which may not be what we want.*/
-    if ((LSBFirst == get_byte_order ())) {
-        img->byte_order = LSBFirst;
-    } else {
-        img->byte_order = MSBFirst;
-    }
-
-    /*The bitmap_bit_order doesn't matter with ZPixmap images.*/
+    img->byte_order = LSBFirst;
     img->bitmap_bit_order = MSBFirst;
-
     return img;
 }
 
-static Window
-create_window (Display *dpy, int screen, int x, int y, int width, int height) {
+Window
+createwindow(Display *dpy, int screen, int x, int y, int w, int h) {
     Window win;
-    unsigned long windowMask;
-    XSetWindowAttributes winAttrib;
+    XSetWindowAttributes wa;
 
-    windowMask = CWBackPixel | CWBorderPixel;
-    winAttrib.border_pixel = BlackPixel (dpy, screen);
-    winAttrib.background_pixel = BlackPixel (dpy, screen);
-    winAttrib.override_redirect = 0;
+    wa.border_pixel = BlackPixel (dpy, screen);
+    wa.background_pixel = BlackPixel (dpy, screen);
+    wa.override_redirect = 0;
 
     win = XCreateWindow (dpy, DefaultRootWindow (dpy),
         x, y,
-        width, height,
+        w, h,
         0, DefaultDepth(dpy, screen),
         InputOutput, CopyFromParent,
-        windowMask, &winAttrib
+        CWBackPixel | CWBorderPixel, &wa
     );
 
     return win;
@@ -353,26 +300,35 @@ render(void) {
     double screenRatio = (double)c.screenWidth / c.screenHeight;
 
     if(ratio > screenRatio) {
-        c.imageWidth = c.screenWidth;
-        c.imageHeight = c.height * c.screenWidth / c.width;
+        c.image_width = c.screenWidth;
+        c.image_height = c.height * c.screenWidth / c.width;
     } else {
-        c.imageWidth = c.width * c.screenHeight / c.height;
-        c.imageHeight = c.screenHeight;
+        c.image_width = c.width * c.screenHeight / c.height;
+        c.image_height = c.screenHeight;
     }
 
-    int64_t start = curusec();
-    c.img = create_image_from_buffer(c.buf, c.width, c.height,
-        c.imageWidth, c.imageHeight);
-    printf("create_image_from_buffer() %ld us\n", curusec() - start);
+    c.img = createimage(c.buf, c.width, c.height,
+        c.image_width, c.image_height);
     if (!c.img)
-        die("Failed to create image");
+        die("Failed to create image\n");
 
     XClearArea(dpy, win, 0, 0, 0, 0, False);
     XPutImage (dpy, win, gc, c.img, 0, 0,
-        (c.screenWidth - c.imageWidth) / 2,
-        (c.screenHeight - c.imageHeight) / 2,
-        c.imageWidth, c.imageHeight);
+        (c.screenWidth - c.image_width) / 2,
+        (c.screenHeight - c.image_height) / 2,
+        c.image_width, c.image_height);
     XFlush (dpy);
+}
+
+void
+buttonpress(XEvent *e) {
+    int i;
+	XButtonPressedEvent *ev = &e->xbutton;
+
+	for(i = 0; i < LENGTH(buttons); i++)
+		if(buttons[i].func && buttons[i].button == ev->button
+		&& CLEANMASK(buttons[i].mask) == CLEANMASK(ev->state))
+			buttons[i].func(&buttons[i].arg);
 }
 
 void
@@ -453,17 +409,28 @@ void
 setup(void) {
     dpy = XOpenDisplay(NULL);
     screen = DefaultScreen(dpy);
-    win = create_window (dpy, screen, 0, 0, 800, 600);
+    win = createwindow (dpy, screen, 0, 0, 800, 600);
     gc = XCreateGC (dpy, win, 0, NULL);
+
+    if(DefaultDepth(dpy, screen) < 24)
+        die("This program does not support displays with a depth less than 24\n");
 
     c.a = archive_read_new();
     archive_read_support_filter_all(c.a);
     archive_read_support_format_all(c.a);
     if(archive_read_open_filename(c.a, c.filename, 10240) != ARCHIVE_OK)
-        die("Failed to open archive: %s", archive_error_string(c.a));
+        die("Failed to open archive: %s\n", archive_error_string(c.a));
 
-    XMapRaised (dpy, win);
-    XSelectInput(dpy, win, ExposureMask | StructureNotifyMask | KeyPressMask);
+    XMapRaised(dpy, win);
+    XSelectInput(dpy, win, ExposureMask | StructureNotifyMask | KeyPressMask | MOUSEMASK);
+
+    loadnext();
+}
+
+void
+usage(void) {
+	fputs("usage: comic [filename]\n", stderr);
+	exit(EXIT_FAILURE);
 }
 
 int
@@ -475,11 +442,10 @@ main(int argc, char *argv[]) {
     } ARGEND;
 
     if(argc == 0)
-        die("No filename specified");
+        usage();
     c.filename = argv[0];
 
     setup();
-    loadnext();
     run();
     cleanup();
 

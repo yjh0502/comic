@@ -1,4 +1,4 @@
-# surf version
+# comic version
 VERSION = 0.1
 
 # Customize below to fit your system
@@ -18,10 +18,6 @@ LIBS = -L/usr/lib -lc -L${X11LIB} -lX11 -ljpeg -larchive # -lfreeimage
 CPPFLAGS = -DVERSION=\"${VERSION}\" -D_BSD_SOURCE
 CFLAGS = -std=c99 -pedantic -Wall -Os ${INCS} ${CPPFLAGS}
 LDFLAGS = -g ${LIBS}
-
-# Solaris
-#CFLAGS = -fast ${INCS} -DVERSION=\"${VERSION}\"
-#LDFLAGS = ${LIBS}
 
 # compiler and linker
 CC = cc
