@@ -16,7 +16,9 @@ LIBS = -L/usr/lib -lc -L${X11LIB} -lX11 -ljpeg -larchive # -lfreeimage
 
 # flags
 CPPFLAGS = -DVERSION=\"${VERSION}\" -D_BSD_SOURCE
-CFLAGS = -std=c99 -pedantic -Wall -Os ${INCS} ${CPPFLAGS}
+CFLAGS = -std=c99 -pedantic -Wall -Os ${INCS} ${CPPFLAGS} \
+	-Wall -Werror -Wno-deprecated-declarations
+
 LDFLAGS = -g ${LIBS}
 
 # compiler and linker

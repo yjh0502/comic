@@ -43,19 +43,45 @@ typedef struct {
     const Arg arg;
 } Key;
 
+enum {
+    Image,
+    FileList,
+    Archive,
+} Type;
+
+typedef struct Node Node;
+struct Node {
+    int type;
+    char *name;
+    Node *parent;
+
+    union {
+        struct {
+            unsigned char *imagebuf;
+            int width, height;
+        } image;
+        struct {
+            int idx, count;
+            struct archive *a;
+            struct archive_entry *entry;
+        } archive;
+        struct {
+            int idx, count;
+            char * const * filenames;
+        } filelist;
+    } u;
+};
+
+#define AR(node) ((node)->u.archive)
+#define IMG(node) ((node)->u.image)
+
 typedef struct Client Client;
 struct Client {
-    const char *filename;
+    Node *node, *curnode;
 
-    int idx, count;
-    struct archive *a;
-    struct archive_entry *entry;
-
-    int screenWidth, screenHeight;
-    unsigned char *buf;
-    int width, height;
     XImage *img;
     int image_width, image_height;
+    int screenWidth, screenHeight;
 };
 
 static Client c;
@@ -70,19 +96,21 @@ char *argv0;
 
 static void die(const char *errstr, ...);
 static void jpegerrorexit (j_common_ptr ci);
-static unsigned char * decodejpeg(void *buf, size_t size, int *w, int *h);
-static XImage *createimage(unsigned char *buf, int w, int h, int target_w, int target_h);
+static void decodejpeg(void *buf, size_t size, Node *nodeout);
+static XImage *createimage(Node *node, int target_w, int target_h);
 static Window createwindow(Display *dpy, int screen, int x, int y, int w, int h);
 static struct archive * openarchive(const char *filename);
 
-static void quit(const Arg *arg);
-static void prev(const Arg *arg);
-static void next(const Arg *arg);
+static int moveoffset(int offset);
+
+void seek(const Arg *arg);
+void quit(const Arg *arg);
 
 static void loadnext(void);
 static void setup(void);
 static void usage(void);
 static void run(void);
+static void cleanupnode(Node *node);
 static void cleanup(void);
 static void render(void);
 static void xsettitle(Window w, const char *str);
@@ -119,13 +147,13 @@ jpegerrorexit (j_common_ptr cinfo) {
 }
 
 /*This returns an array for a 24 bit image.*/
-unsigned char *
-decodejpeg (void *buf, size_t size, int *widthPtr, int *heightPtr) {
+void
+decodejpeg (void *buf, size_t size, Node *nodeout) {
     register JSAMPARRAY lineBuf;
     struct jpeg_decompress_struct cinfo;
     struct jpeg_error_mgr err_mgr;
-    int bytesPerPix;
-    unsigned char *retBuf;
+    int width, height, bytesPerPix;
+    unsigned char *decodebuf;
 
     cinfo.err = jpeg_std_error (&err_mgr);
     err_mgr.error_exit = jpegerrorexit;
@@ -137,22 +165,20 @@ decodejpeg (void *buf, size_t size, int *widthPtr, int *heightPtr) {
     cinfo.do_block_smoothing = 0;
     jpeg_start_decompress (&cinfo);
 
-    *widthPtr = cinfo.output_width;
-    *heightPtr = cinfo.output_height;
+    width = cinfo.output_width;
+    height = cinfo.output_height;
     bytesPerPix = cinfo.output_components;
 
-    lineBuf = cinfo.mem->alloc_sarray ((j_common_ptr) &cinfo, JPOOL_IMAGE, (*widthPtr * bytesPerPix), 1);
-    retBuf = malloc (3 * (*widthPtr * *heightPtr));
+    lineBuf = cinfo.mem->alloc_sarray ((j_common_ptr) &cinfo, JPOOL_IMAGE, (width * bytesPerPix), 1);
+    decodebuf = malloc (3 * (width * height));
 
-    if (NULL == retBuf) {
-        perror (NULL);
-        return NULL;
-    }
+    if (NULL == buf)
+        die("Failed to allocate memory on JPEG decoding");
 
+    int x, y;
+    unsigned char *base = decodebuf;
     if (3 == bytesPerPix) {
-        int lineOffset = (*widthPtr * 3);
-        int y;
-        unsigned char *base = retBuf;
+        int lineOffset = (width * 3);
         for (y = 0; y < cinfo.output_height; ++y) {
             jpeg_read_scanlines (&cinfo, lineBuf, 1);
             memcpy(base, *lineBuf, lineOffset);
@@ -160,10 +186,6 @@ decodejpeg (void *buf, size_t size, int *widthPtr, int *heightPtr) {
         }
     } else if (1 == bytesPerPix) {
         unsigned int col;
-        int width = *widthPtr;
-        int x, y;
-
-        unsigned char * base = retBuf;
         for (y = 0; y < cinfo.output_height; ++y) {
             jpeg_read_scanlines (&cinfo, lineBuf, 1);
 
@@ -181,7 +203,9 @@ decodejpeg (void *buf, size_t size, int *widthPtr, int *heightPtr) {
     jpeg_finish_decompress (&cinfo);
     jpeg_destroy_decompress (&cinfo);
 
-    return retBuf;
+    IMG(nodeout).imagebuf = decodebuf;
+    IMG(nodeout).height = height;
+    IMG(nodeout).width = width;
 }
 
 void
@@ -189,33 +213,59 @@ loadnext(void) {
     char *data;
     size_t size, read;
 
-    if(archive_read_next_header(c.a, &c.entry) != ARCHIVE_OK)
-        die("Failed to read archive: %s\n", archive_error_string(c.a));
+    struct Node *node;
+    struct archive *a;
+    struct archive_entry *entry;
 
-    printf("%s\n", archive_entry_pathname(c.entry));
-    if(archive_entry_filetype(c.entry) & AE_IFDIR) {
-        ++c.idx;
+    node = c.curnode;
+    switch(node->type) {
+    case Image:
+        moveoffset(1);
         return;
+    case Archive:
+        a = AR(node).a;
+        if(archive_read_next_header(a, &entry) != ARCHIVE_OK)
+            die("Failed to read archive: %s\n", archive_error_string(a));
+
+        printf("%s\n", archive_entry_pathname(entry));
+        if(archive_entry_filetype(entry) & AE_IFDIR) {
+            ++AR(node).idx;
+            return;
+        }
+
+        size = archive_entry_size(entry);
+        if(size > IMAGE_SIZE_LIMIT)
+            die("Image size too large");
+
+        data = malloc(size);
+        if((read = archive_read_data(a, data, size)) != size)
+            die("Failed to read whole %d != %d, %s, %s, %s\n", read, size,
+                archive_entry_pathname(entry),
+                archive_error_string(a), strerror(errno));
+
+        Node *imagenode = malloc(sizeof(Node));
+        *imagenode = (Node){
+            .type = Image,
+            .name = strdup(archive_entry_pathname(entry)),
+            .parent = c.curnode };
+
+        decodejpeg(data, size, imagenode);
+        free(data);
+
+        AR(node).entry = entry;
+        ++AR(node).idx;
+        c.curnode = imagenode;
+        break;
+    case FileList:
+        //TODO:
+        die("Not implemented yet: loadnext, filelist");
     }
-
-    size = archive_entry_size(c.entry);
-    data = malloc(size);
-    if((read = archive_read_data(c.a, data, size)) != size)
-        die("Failed to read whole %d != %d, %s, %s, %s\n", read, size,
-            archive_entry_pathname(c.entry),
-            archive_error_string(c.a), strerror(errno));
-
-    free(c.buf);
-    c.buf = decodejpeg(data, size, &c.width, &c.height);
-    if (!c.buf)
-        die("Unable to decode JPEG\n");
-    free(data);
-
-    ++c.idx;
 }
 
 XImage *
-createimage(unsigned char *buf, int w, int h, int target_w, int target_h) {
+createimage(Node *node, int target_w, int target_h) {
+    unsigned char *buf = IMG(node).imagebuf;
+    int w = IMG(node).width, h = IMG(node).height;
     XImage *img = NULL;
     int i = 0, out_idx = 0;
     int x, y, sample_x, sample_y;
@@ -274,22 +324,28 @@ render(void) {
     if(c.img)
         XDestroyImage(c.img);
 
-    if(!c.width || !c.height)
+    if(c.curnode->type != Image)
+        die("BUG: curdnode->type != Image on render()");
+
+    int width, height;
+    width = IMG(c.curnode).width;
+    height = IMG(c.curnode).height;
+
+    if(!width || !height)
         return;
 
-    double ratio = (double)c.width / c.height;
+    double ratio = (double)width / height;
     double screenRatio = (double)c.screenWidth / c.screenHeight;
 
     if(ratio > screenRatio) {
         c.image_width = c.screenWidth;
-        c.image_height = c.height * c.screenWidth / c.width;
+        c.image_height = height * c.screenWidth / width;
     } else {
-        c.image_width = c.width * c.screenHeight / c.height;
+        c.image_width = width * c.screenHeight / height;
         c.image_height = c.screenHeight;
     }
 
-    c.img = createimage(c.buf, c.width, c.height,
-        c.image_width, c.image_height);
+    c.img = createimage(c.curnode, c.image_width, c.image_height);
     if (!c.img)
         die("Failed to create image\n");
 
@@ -300,9 +356,9 @@ render(void) {
         c.image_width, c.image_height);
     XFlush (dpy);
 
-    char title[1024];
-    snprintf(title, 1024, "%s (%d/%d): %s", c.filename, c.idx, c.count,
-        archive_entry_pathname(c.entry));
+    //TODO: recursive title generation
+    char title[TITLE_LENGTH_LIMIT];
+    snprintf(title, TITLE_LENGTH_LIMIT, "%s", c.node->name);
     xsettitle(win, title);
 }
 
@@ -349,11 +405,35 @@ run(void) {
 }
 
 void
+cleanupnode(Node *node) {
+    switch(node->type) {
+    case Image:
+        free(IMG(node).imagebuf);
+        free(node->name);
+        break;
+    case Archive:
+        archive_read_free(AR(node).a);
+        break;
+    case FileList:
+        die("Not implemented: cleanupnode, filelist");
+        break;
+    }
+
+    free(node);
+    return;
+}
+
+void
 cleanup(void) {
     XDestroyImage(c.img);
-    free(c.buf);
 
-    archive_read_free(c.a);
+    Node *node;
+    while(c.curnode) {
+        node = c.curnode->parent;
+        cleanupnode(c.curnode);
+        c.curnode = node;
+    }
+
     XFreeGC(dpy, gc);
     XDestroyWindow(dpy, win);
     XCloseDisplay(dpy);
@@ -364,41 +444,66 @@ quit(const Arg *arg) {
     running = False;
 }
 
-void
-prev(const Arg *arg) {
-    int advance;
-    struct archive_entry *entry;
+int
+moveoffset(int offset) {
+    Node *node;
+    int idx, advance = 0;
+    struct archive *a;
+    struct archive_entry *entry = NULL;
 
-    archive_read_free(c.a);
-    c.a = openarchive(c.filename);
+    node = c.curnode;
+    switch(node->type) {
+    case Image:
+        c.curnode = c.curnode->parent;
+        cleanupnode(node);
+        return moveoffset(offset);
 
-    advance = c.idx - arg->i;
-    c.idx = 0;
-    while(--advance > 0) {
-        if(archive_read_next_header(c.a, &entry) != ARCHIVE_OK)
-            die("Failed to seek archive");
-        ++c.idx;
+    case Archive:
+        a = AR(node).a;
+        idx = AR(node).idx;
+        if(idx == AR(c.node).count)
+            return 0;
+
+        if(offset >= 0) {
+            advance = MIN(offset, AR(node).count - idx);
+            while(--advance > 0) {
+                ++idx;
+                if(archive_read_next_header(a, &entry) != ARCHIVE_OK)
+                    die("Failed to seek archive");
+            }
+        } else {
+            archive_read_free(a);
+            a = openarchive(node->name);
+
+            advance = AR(c.node).idx + offset;
+            idx = 0;
+            while(--advance > 0) {
+                if(archive_read_next_header(a, &entry) != ARCHIVE_OK)
+                    die("Failed to seek archive");
+                ++idx;
+            }
+            AR(node).a = a;
+        }
+
+        AR(node).idx = idx;
+        AR(node).entry = entry;
+        break;
+
+    case FileList:
+        //TODO:
+        die("Not implemented yet: seek filelist");
+        break;
     }
 
     loadnext();
     render();
+    return advance;
+    return 0;
 }
 
 void
-next(const Arg *arg) {
-    int advance;
-    if(c.idx == c.count)
-        return;
-
-    advance = MIN(arg->i, c.count - c.idx);
-    while(--advance > 0) {
-        ++c.idx;
-        if(archive_read_next_header(c.a, &c.entry) != ARCHIVE_OK)
-            die("Failed to seek archive");
-    }
-
-    loadnext();
-    render();
+seek(const Arg *arg) {
+    moveoffset(arg->i);
 }
 
 void
@@ -433,7 +538,7 @@ openarchive(const char *filename) {
     a = archive_read_new();
     archive_read_support_filter_all(a);
     archive_read_support_format_all(a);
-    if(archive_read_open_filename(a, c.filename, 10240) != ARCHIVE_OK)
+    if(archive_read_open_filename(a, c.node->name, ARCHIVE_BLOCK_SIZE) != ARCHIVE_OK)
         die("Failed to open archive: %s\n", archive_error_string(a));
 
     return a;
@@ -451,18 +556,19 @@ setup(void) {
 
     struct archive *a;
     struct archive_entry *entry;
-
-    a = openarchive(c.filename);
+    a = openarchive(c.node->name);
     while(archive_read_next_header(a, &entry) == ARCHIVE_OK)
-        ++c.count;
+        ++AR(c.node).count;
+
     archive_read_free(a);
 
-    c.a = openarchive(c.filename);
-    c.idx = 0;
+    AR(c.node).a = openarchive(c.node->name);
+    AR(c.node).idx = 0;
 
     XMapRaised(dpy, win);
     XSelectInput(dpy, win, ExposureMask | StructureNotifyMask | KeyPressMask | ButtonPressMask);
 
+    c.curnode = c.node;
     loadnext();
 }
 
@@ -482,7 +588,13 @@ main(int argc, char *argv[]) {
 
     if(argc == 0)
         usage();
-    c.filename = argv[0];
+
+    c.node = malloc(sizeof(Node));
+    *c.node = (Node){
+        .parent = NULL,
+        .type = Archive,
+        .name = argv[0],
+    };
 
     setup();
     run();
