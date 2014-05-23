@@ -100,30 +100,25 @@ static char *wmname = "comic";
 
 char *argv0;
 
-static void die(const char *errstr, ...);
-static void jpegerrorexit (j_common_ptr ci);
-static void decodejpeg(void *buf, size_t size, Node *nodeout);
-static XImage *createimage(Node *node, int target_w, int target_h);
-static Window createwindow(Display *dpy, int screen, int x, int y, int w, int h);
-static struct archive * openarchive(const char *filename);
-
-static int moveoffset(int offset);
-
-void seek(const Arg *arg);
-void quit(const Arg *arg);
-
-
 static char * readfile(const char *filename, size_t *size);
-static void loadnext(void);
-static void setup(void);
-static void usage(void);
-static void run(void);
+static int moveoffset(int offset);
+static struct archive * openarchive(const char *filename);
 static void cleanupnode(Node *node);
 static void cleanup(void);
+static void decodejpeg(void *buf, size_t size, Node *nodeout);
+static void die(const char *errstr, ...);
 static void gentitle(Node *node, char *buf, size_t size, size_t *outsize);
+static void jpegerrorexit (j_common_ptr ci);
+static void loadnext(void);
 static void render(void);
+static void run(void);
+static void setup(void);
+static void usage(void);
 static void xsettitle(Window w, const char *str);
-
+static Window createwindow(Display *dpy, int screen, int x, int y, int w, int h);
+static XImage *createimage(Node *node, int target_w, int target_h);
+void quit(const Arg *arg);
+void seek(const Arg *arg);
 static void buttonpress(XEvent *e);
 static void configurenotify(XEvent *e);
 static void expose(XEvent *e);
