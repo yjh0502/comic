@@ -120,6 +120,7 @@ static void usage(void);
 static void run(void);
 static void cleanupnode(Node *node);
 static void cleanup(void);
+static void gentitle(Node *node, char *buf, size_t size, size_t *outsize);
 static void render(void);
 static void xsettitle(Window w, const char *str);
 
@@ -390,6 +391,31 @@ createwindow(Display *dpy, int screen, int x, int y, int w, int h) {
 }
 
 void
+gentitle(Node *node, char *buf, size_t size, size_t *outsize) {
+    if(!node) {
+        *outsize = 0;
+        return;
+    }
+
+    gentitle(node->parent, buf, size, outsize);
+    buf += *outsize;
+    size -= *outsize;
+    switch(node->type) {
+    case Image:
+        *outsize += snprintf(buf, size, "%s", node->name);
+        break;
+    case Archive:
+        *outsize += snprintf(buf, size, "%s [%d/%d] | ", node->name,
+            AR(node).idx + 1, AR(node).count);
+        break;
+    case FileList:
+        *outsize += snprintf(buf, size, "%s [%d/%d] | ", node->name,
+            FL(node).idx + 1, FL(node).count);
+        break;
+    }
+}
+
+void
 render(void) {
     if(c.img) {
         XDestroyImage(c.img);
@@ -429,8 +455,9 @@ render(void) {
     XFlush (dpy);
 
     //TODO: recursive title generation
+    size_t writelen;
     char title[TITLE_LENGTH_LIMIT];
-    snprintf(title, TITLE_LENGTH_LIMIT, "%s", c.node->name);
+    gentitle(c.curnode, title, TITLE_LENGTH_LIMIT, &writelen);
     xsettitle(win, title);
 }
 
@@ -552,7 +579,7 @@ moveoffset(int offset) {
             // should not fail
             a = openarchive(node->name);
 
-            advance = AR(c.node).idx + offset;
+            advance = idx + offset;
             idx = 0;
             while(--advance > 0) {
                 if(archive_read_next_header(a, &entry) != ARCHIVE_OK)
