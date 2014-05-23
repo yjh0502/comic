@@ -571,9 +571,7 @@ moveoffset(int offset) {
         // It does not be a problem if file is an image, but
         // if the last file is an archive, same file is opened twice
         // and seek to position 0
-        if(FL(node).idx < FL(node).count - 1) {
-            ++FL(node).idx;
-        }
+        FL(node).idx = MIN(MAX(FL(node).idx + offset, 0), FL(node).count - 1);
         break;
     }
 
