@@ -252,7 +252,6 @@ loadnext(void) {
     struct archive *a;
     struct archive_entry *entry;
 
-
     node = c.curnode;
     switch(node->type) {
     case Image:
@@ -646,7 +645,6 @@ setup(void) {
     screen = DefaultScreen(dpy);
     win = createwindow (dpy, screen, 0, 0, 800, 600);
     gc = XCreateGC (dpy, win, 0, NULL);
-
 
     if(DefaultDepth(dpy, screen) < 24)
         die("This program does not support displays with a depth less than 24\n");
