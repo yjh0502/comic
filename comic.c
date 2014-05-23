@@ -3,12 +3,16 @@
 #include <archive_entry.h>
 #include <archive.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/types.h>
+#include <unistd.h>
 #include <X11/cursorfont.h>
 #include <X11/keysym.h>
 #include <X11/Xatom.h>
@@ -74,6 +78,7 @@ struct Node {
 
 #define AR(node) ((node)->u.archive)
 #define IMG(node) ((node)->u.image)
+#define FL(node) ((node)->u.filelist)
 
 typedef struct Client Client;
 struct Client {
@@ -91,6 +96,7 @@ static GC gc;
 
 static int screen;
 static Bool running = True;
+static char *wmname = "comic";
 
 char *argv0;
 
@@ -106,6 +112,8 @@ static int moveoffset(int offset);
 void seek(const Arg *arg);
 void quit(const Arg *arg);
 
+
+static char * readfile(const char *filename, size_t *size);
 static void loadnext(void);
 static void setup(void);
 static void usage(void);
@@ -208,20 +216,54 @@ decodejpeg (void *buf, size_t size, Node *nodeout) {
     IMG(nodeout).width = width;
 }
 
+char *
+readfile(const char *filename, size_t *size) {
+    int fd;
+    char *buf;
+    struct stat stat;
+
+    fd = open(filename, O_RDONLY);
+    fstat(fd, &stat);
+
+    buf = malloc(stat.st_size);
+    if((*size = read(fd, buf, stat.st_size)) != stat.st_size)
+        die("Failed to read whole: %lu != %lu", *size, stat.st_size);
+
+    return buf;
+}
+
+Node *
+imagenode(const char *name, char *data, size_t size, Node * parent) {
+    //TODO: proper error handling
+    Node *newnode = malloc(sizeof(Node));
+    *newnode = (Node){
+        .type = Image,
+        .name = strdup(name),
+        .parent = parent };
+
+    decodejpeg(data, size, newnode);
+    free(data);
+    return newnode;
+}
+
 void
 loadnext(void) {
-    char *data;
+    char *filename, *data;
+    int count;
     size_t size, read;
 
-    struct Node *node;
+    struct Node *node, *newnode;
     struct archive *a;
     struct archive_entry *entry;
 
+
     node = c.curnode;
+    printf("loadnext: %s\n", node->name);
     switch(node->type) {
     case Image:
         moveoffset(1);
         return;
+
     case Archive:
         a = AR(node).a;
         if(archive_read_next_header(a, &entry) != ARCHIVE_OK)
@@ -243,22 +285,50 @@ loadnext(void) {
                 archive_entry_pathname(entry),
                 archive_error_string(a), strerror(errno));
 
-        Node *imagenode = malloc(sizeof(Node));
-        *imagenode = (Node){
-            .type = Image,
-            .name = strdup(archive_entry_pathname(entry)),
-            .parent = c.curnode };
-
-        decodejpeg(data, size, imagenode);
-        free(data);
-
         AR(node).entry = entry;
         ++AR(node).idx;
-        c.curnode = imagenode;
+        c.curnode = imagenode(archive_entry_pathname(entry),
+            data, size, node);
         break;
+
     case FileList:
-        //TODO:
-        die("Not implemented yet: loadnext, filelist");
+        filename = FL(node).filenames[FL(node).idx];
+        printf("filename: %s\n", filename);
+
+        //TODO: should detect filetype
+        count = 0;
+        a = openarchive(filename);
+        if(a) {
+            while(archive_read_next_header(a, &entry) == ARCHIVE_OK)
+                ++count;
+            archive_read_free(a);
+
+            newnode = malloc(sizeof(Node));
+            *newnode = (Node){
+                .type = Archive,
+                .name = strdup(filename),
+                .parent = node,
+                .u = { .archive = {
+                    .a = openarchive(filename),
+                    .idx = 0,
+                    .count = count,
+                }}};
+
+            c.curnode = newnode;
+            loadnext();
+        } else {
+            // Cannot open given file as an archive, try to open as a image.
+            data = readfile(filename, &size);
+            if(!data) {
+                printf("Failed to read file: %s", filename);
+                moveoffset(1);
+                loadnext();
+                return;
+            }
+
+            c.curnode = imagenode(filename, data, size, node);
+        }
+        break;
     }
 }
 
@@ -321,11 +391,13 @@ createwindow(Display *dpy, int screen, int x, int y, int w, int h) {
 
 void
 render(void) {
-    if(c.img)
+    if(c.img) {
         XDestroyImage(c.img);
+        c.img = NULL;
+    }
 
     if(c.curnode->type != Image)
-        die("BUG: curdnode->type != Image on render()");
+        die("BUG: curnode->type != Image on render()");
 
     int width, height;
     width = IMG(c.curnode).width;
@@ -413,9 +485,9 @@ cleanupnode(Node *node) {
         break;
     case Archive:
         archive_read_free(AR(node).a);
+        free(node->name);
         break;
     case FileList:
-        die("Not implemented: cleanupnode, filelist");
         break;
     }
 
@@ -452,6 +524,7 @@ moveoffset(int offset) {
     struct archive_entry *entry = NULL;
 
     node = c.curnode;
+    printf("moveoffset: %s\n", node->name);
     switch(node->type) {
     case Image:
         c.curnode = c.curnode->parent;
@@ -461,8 +534,11 @@ moveoffset(int offset) {
     case Archive:
         a = AR(node).a;
         idx = AR(node).idx;
-        if(idx == AR(c.node).count)
-            return 0;
+        if(idx == AR(node).count) {
+            c.curnode = c.curnode->parent;
+            cleanupnode(node);
+            return moveoffset(offset);
+        }
 
         if(offset >= 0) {
             advance = MIN(offset, AR(node).count - idx);
@@ -473,6 +549,7 @@ moveoffset(int offset) {
             }
         } else {
             archive_read_free(a);
+            // should not fail
             a = openarchive(node->name);
 
             advance = AR(c.node).idx + offset;
@@ -490,8 +567,13 @@ moveoffset(int offset) {
         break;
 
     case FileList:
-        //TODO:
-        die("Not implemented yet: seek filelist");
+        // BUG: At the end of the file, Same file opened twice.
+        // It does not be a problem if file is an image, but
+        // if the last file is an archive, same file is opened twice
+        // and seek to position 0
+        if(FL(node).idx < FL(node).count - 1) {
+            ++FL(node).idx;
+        }
         break;
     }
 
@@ -538,8 +620,9 @@ openarchive(const char *filename) {
     a = archive_read_new();
     archive_read_support_filter_all(a);
     archive_read_support_format_all(a);
-    if(archive_read_open_filename(a, c.node->name, ARCHIVE_BLOCK_SIZE) != ARCHIVE_OK)
-        die("Failed to open archive: %s\n", archive_error_string(a));
+
+    if(archive_read_open_filename(a, filename, ARCHIVE_BLOCK_SIZE) != ARCHIVE_OK)
+        return NULL;
 
     return a;
 }
@@ -551,19 +634,9 @@ setup(void) {
     win = createwindow (dpy, screen, 0, 0, 800, 600);
     gc = XCreateGC (dpy, win, 0, NULL);
 
+
     if(DefaultDepth(dpy, screen) < 24)
         die("This program does not support displays with a depth less than 24\n");
-
-    struct archive *a;
-    struct archive_entry *entry;
-    a = openarchive(c.node->name);
-    while(archive_read_next_header(a, &entry) == ARCHIVE_OK)
-        ++AR(c.node).count;
-
-    archive_read_free(a);
-
-    AR(c.node).a = openarchive(c.node->name);
-    AR(c.node).idx = 0;
 
     XMapRaised(dpy, win);
     XSelectInput(dpy, win, ExposureMask | StructureNotifyMask | KeyPressMask | ButtonPressMask);
@@ -583,6 +656,8 @@ main(int argc, char *argv[]) {
     /* command line args */
     ARGBEGIN {
     default:
+	case 'n':
+		wmname = EARGF(usage());
         break;
     } ARGEND;
 
@@ -591,9 +666,10 @@ main(int argc, char *argv[]) {
 
     c.node = malloc(sizeof(Node));
     *c.node = (Node){
+        .type = FileList,
+        .name = wmname,
         .parent = NULL,
-        .type = Archive,
-        .name = argv[0],
+        .u = { .filelist = { .idx = 0, .count = argc, .filenames = argv } }
     };
 
     setup();
