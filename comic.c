@@ -259,7 +259,6 @@ loadnext(void) {
 
 
     node = c.curnode;
-    printf("loadnext: %s\n", node->name);
     switch(node->type) {
     case Image:
         moveoffset(1);
@@ -270,7 +269,6 @@ loadnext(void) {
         if(archive_read_next_header(a, &entry) != ARCHIVE_OK)
             die("Failed to read archive: %s\n", archive_error_string(a));
 
-        printf("%s\n", archive_entry_pathname(entry));
         if(archive_entry_filetype(entry) & AE_IFDIR) {
             ++AR(node).idx;
             return;
@@ -294,7 +292,6 @@ loadnext(void) {
 
     case FileList:
         filename = FL(node).filenames[FL(node).idx];
-        printf("filename: %s\n", filename);
 
         //TODO: should detect filetype
         count = 0;
@@ -405,12 +402,10 @@ gentitle(Node *node, char *buf, size_t size, size_t *outsize) {
         *outsize += snprintf(buf, size, "%s", node->name);
         break;
     case Archive:
-        *outsize += snprintf(buf, size, "%s [%d/%d] | ", node->name,
-            AR(node).idx + 1, AR(node).count);
+        *outsize += snprintf(buf, size, "%s [%d/%d] | ", node->name, AR(node).idx + 1, AR(node).count);
         break;
     case FileList:
-        *outsize += snprintf(buf, size, "%s [%d/%d] | ", node->name,
-            FL(node).idx + 1, FL(node).count);
+        *outsize += snprintf(buf, size, "%s [%d/%d] | ", node->name, FL(node).idx + 1, FL(node).count);
         break;
     }
 }
@@ -479,7 +474,6 @@ configurenotify(XEvent *e) {
     if(c.screenWidth != xce.width || c.screenHeight != xce.height) {
         c.screenWidth = xce.width;
         c.screenHeight = xce.height;
-        printf("w:%d, h:%d\n", c.screenWidth, c.screenHeight);
         render();
     }
 }
@@ -551,7 +545,6 @@ moveoffset(int offset) {
     struct archive_entry *entry = NULL;
 
     node = c.curnode;
-    printf("moveoffset: %s\n", node->name);
     switch(node->type) {
     case Image:
         c.curnode = c.curnode->parent;
