@@ -174,7 +174,7 @@ decodejpeg (void *buf, size_t size, Node *nodeout) {
     bytesPerPix = cinfo.output_components;
 
     lineBuf = cinfo.mem->alloc_sarray ((j_common_ptr) &cinfo, JPOOL_IMAGE, (width * bytesPerPix), 1);
-    decodebuf = malloc (3 * (width * height));
+    decodebuf = malloc(3 * (width * height) + 1);
 
     if (NULL == buf)
         die("Failed to allocate memory on JPEG decoding");
@@ -329,19 +329,17 @@ createimage(Node *node, int target_w, int target_h) {
     unsigned char *buf = IMG(node).imagebuf;
     int w = IMG(node).width, h = IMG(node).height;
     XImage *img = NULL;
-    int i = 0, out_idx = 0;
+    int out_idx = 0;
     int x, y, sample_x, sample_y;
-    uint32_t *image_buf;
+    uint32_t *imagebuf;
 
-    image_buf = malloc (sizeof(uint32_t) * target_w* target_h);
+    imagebuf = malloc(sizeof(uint32_t) * target_w * target_h);
     // Nearest sampling
     for(y = 0; y < target_h; y++) {
-        sample_y = y * h / target_h;
+        sample_y = y * h / target_h * w * 3;
         for(x = 0; x < target_w; x++) {
-            sample_x = x * w / target_w;
-            i = (sample_y * w + sample_x) * 3;
-
-            image_buf[out_idx] = (buf[i] << 16) | (buf[i+1] << 8) | (buf[i+2]);
+            sample_x = x * w / target_w * 3;
+            imagebuf[out_idx] = (*(uint32_t*)(buf + sample_y + sample_x)) << 8;
             ++out_idx;
         }
     }
@@ -349,13 +347,13 @@ createimage(Node *node, int target_w, int target_h) {
     img = XCreateImage (dpy,
         CopyFromParent, DefaultDepth(dpy, screen),
         ZPixmap, 0,
-        (char *) image_buf,
+        (char *) imagebuf,
         target_w, target_h,
         32, 0
     );
 
     XInitImage (img);
-    img->byte_order = LSBFirst;
+    img->byte_order = MSBFirst;
     img->bitmap_bit_order = MSBFirst;
 
     return img;

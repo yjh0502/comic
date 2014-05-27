@@ -12,12 +12,12 @@ X11LIB = /usr/X11R6/lib
 
 # includes and libs
 INCS = -I. -I/usr/include -I${X11INC}
-LIBS = -lc -L${X11LIB} -lX11 -ljpeg -larchive
+LIBS = -L/usr/local/lib -lc -L${X11LIB} -lX11 -ljpeg -larchive
 
 # flags
 CPPFLAGS = -DVERSION=\"${VERSION}\" -D_BSD_SOURCE
 CFLAGS = -std=c99 -pedantic -Wall -Os ${INCS} ${CPPFLAGS} \
-	-Wall -Werror -Wno-deprecated-declarations
+	-Wall -Werror -Wno-deprecated-declarations -g -ggdb
 
 LDFLAGS = -g ${LIBS}
 
