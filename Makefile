@@ -1,4 +1,4 @@
-# comic - simple browser
+# comic - minimalistic image viewer
 # See LICENSE file for copyright and license details.
 
 include config.mk
