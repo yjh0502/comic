@@ -264,6 +264,7 @@ loadnext(void) {
             die("Failed to read archive: %s\n", archive_error_string(a));
 
         if(archive_entry_filetype(entry) & AE_IFDIR) {
+            die("!!!!");
             ++AR(node).idx;
             return;
         }
@@ -274,7 +275,7 @@ loadnext(void) {
 
         data = malloc(size);
         if((read = archive_read_data(a, data, size)) != size)
-            die("Failed to read whole %d != %d, %s, %s, %s\n", read, size,
+            die("Failed to read whole %ld != %ld, %s, %s, %s\n", read, size,
                 archive_entry_pathname(entry),
                 archive_error_string(a), strerror(errno));
 
@@ -291,8 +292,10 @@ loadnext(void) {
         count = 0;
         a = openarchive(filename);
         if(a) {
-            while(archive_read_next_header(a, &entry) == ARCHIVE_OK)
+            while(archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+                archive_read_data_skip(a);
                 ++count;
+            }
             archive_read_free(a);
 
             newnode = malloc(sizeof(Node));
