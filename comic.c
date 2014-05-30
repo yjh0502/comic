@@ -5,21 +5,13 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
-#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/time.h>
-#include <sys/types.h>
-#include <unistd.h>
-#include <X11/cursorfont.h>
 #include <X11/keysym.h>
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
-#include <X11/Xproto.h>
 #include <X11/Xutil.h>
-
 #include <jpeglib.h>
 #include <jerror.h>
 
@@ -34,10 +26,10 @@ typedef union {
 } Arg;
 
 typedef struct {
-	unsigned int mask;
-	unsigned int button;
-	void (*func)(const Arg *arg);
-	const Arg arg;
+    unsigned int mask;
+    unsigned int button;
+    void (*func)(const Arg *arg);
+    const Arg arg;
 } Button;
 
 typedef struct {
@@ -49,9 +41,16 @@ typedef struct {
 
 enum {
     Image,
-    FileList,
+    Page,
     Archive,
+    FileList,
 } Type;
+
+typedef struct vec2 vec2;
+struct vec2 { int x, y; };
+static double vec2_ratio(vec2 v) { return (double)v.x / v.y; }
+static vec2 vec2_scale(vec2 v, double r) { v.x *= r; v.y *= r; return v; }
+static vec2 vec2_add(vec2 v1, vec2 vec2) { v1.x += vec2.x; v1.y += vec2.y; return v1; }
 
 typedef struct Node Node;
 struct Node {
@@ -62,8 +61,12 @@ struct Node {
     union {
         struct {
             unsigned char *imagebuf;
-            int width, height;
+            vec2 size;
         } image;
+        struct {
+            int count;
+            Node **images;
+        } page;
         struct {
             int idx, count;
             struct archive *a;
@@ -78,36 +81,32 @@ struct Node {
 
 #define AR(node) ((node)->u.archive)
 #define IMG(node) ((node)->u.image)
+#define PG(node) ((node)->u.page)
 #define FL(node) ((node)->u.filelist)
 
-typedef struct Client Client;
-struct Client {
-    Node *node, *curnode;
-
-    XImage *img;
-    int image_width, image_height;
-    int screenWidth, screenHeight;
-};
-
-static Client c;
 static Display *dpy;
 static Window win;
+static int screen;
 static GC gc;
 
-static int screen;
+Node *node, *curnode;
 static Bool running = True;
 static char *wmname = "comic";
+static int imageperpage = 1;
+vec2 viewsize;
 
 char *argv0;
 
-static char * readfile(const char *filename, size_t *size);
+static char *readfile(const char *filename, size_t *size);
 static int moveoffset(int offset);
+static Node *imagenode(Node * parent, const char *name, char *data, size_t size);
+static Node *pagenode(Node * parent, Node **images, int count);
 static struct archive * openarchive(const char *filename);
 static void cleanupnode(Node *node);
 static void cleanup(void);
 static void decodejpeg(void *buf, size_t size, Node *nodeout);
 static void die(const char *errstr, ...);
-static void gentitle(Node *node, char *buf, size_t size, size_t *outsize);
+static char *gentitle(Node *node);
 static void jpegerrorexit (j_common_ptr ci);
 static void loadnext(void);
 static void render(void);
@@ -116,9 +115,10 @@ static void setup(void);
 static void usage(void);
 static void xsettitle(Window w, const char *str);
 static Window createwindow(Display *dpy, int screen, int x, int y, int w, int h);
-static XImage *createimage(Node *node, int target_w, int target_h);
-void quit(const Arg *arg);
-void seek(const Arg *arg);
+static XImage *createimage(Node *node, vec2 size);
+static void quit(const Arg *arg);
+static void seek(const Arg *arg);
+static void seekabs(const Arg *arg);
 static void buttonpress(XEvent *e);
 static void configurenotify(XEvent *e);
 static void expose(XEvent *e);
@@ -137,7 +137,6 @@ static void (*handler[LASTEvent]) (XEvent *) = {
 void
 die(const char *errstr, ...) {
     va_list ap;
-
     va_start(ap, errstr);
     vfprintf(stderr, errstr, ap);
     va_end(ap);
@@ -147,17 +146,18 @@ die(const char *errstr, ...) {
 void
 jpegerrorexit (j_common_ptr cinfo) {
     cinfo->err->output_message (cinfo);
-    die("Error on jpeg\n");
+    die("Error on jpeg");
 }
 
 /*This returns an array for a 24 bit image.*/
 void
 decodejpeg (void *buf, size_t size, Node *nodeout) {
-    register JSAMPARRAY lineBuf;
+    JSAMPARRAY linebuf;
     struct jpeg_decompress_struct cinfo;
     struct jpeg_error_mgr err_mgr;
-    int width, height, bytesPerPix;
-    unsigned char *decodebuf;
+    vec2 imgsize;
+    int x = 0, y, bytesperpixel, lineoffset;
+    unsigned char *decodebuf, *base;
 
     cinfo.err = jpeg_std_error (&err_mgr);
     err_mgr.error_exit = jpegerrorexit;
@@ -165,51 +165,38 @@ decodejpeg (void *buf, size_t size, Node *nodeout) {
     jpeg_create_decompress (&cinfo);
     jpeg_mem_src (&cinfo, buf, size);
     jpeg_read_header (&cinfo, 1);
-    cinfo.do_fancy_upsampling = 0;
-    cinfo.do_block_smoothing = 0;
     jpeg_start_decompress (&cinfo);
 
-    width = cinfo.output_width;
-    height = cinfo.output_height;
-    bytesPerPix = cinfo.output_components;
+    imgsize = (vec2){.x = cinfo.output_width, .y = cinfo.output_height};
+    bytesperpixel = cinfo.output_components;
 
-    lineBuf = cinfo.mem->alloc_sarray ((j_common_ptr) &cinfo, JPOOL_IMAGE, (width * bytesPerPix), 1);
-    decodebuf = malloc(3 * (width * height) + 1);
-
-    if (NULL == buf)
+    linebuf = cinfo.mem->alloc_sarray ((j_common_ptr) &cinfo, JPOOL_IMAGE, (imgsize.x * bytesperpixel), 1);
+    if(!(decodebuf = malloc(3 * (imgsize.x * imgsize.y) + 1)))
         die("Failed to allocate memory on JPEG decoding");
 
-    int x, y;
-    unsigned char *base = decodebuf;
-    if (3 == bytesPerPix) {
-        int lineOffset = (width * 3);
-        for (y = 0; y < cinfo.output_height; ++y) {
-            jpeg_read_scanlines (&cinfo, lineBuf, 1);
-            memcpy(base, *lineBuf, lineOffset);
-            base += lineOffset;
-        }
-    } else if (1 == bytesPerPix) {
-        unsigned int col;
-        for (y = 0; y < cinfo.output_height; ++y) {
-            jpeg_read_scanlines (&cinfo, lineBuf, 1);
-
-            for (x = 0; x < width; ++x) {
-                col = lineBuf[0][x];
-
-                memset(base, col, 3);
+    base = decodebuf;
+    lineoffset = (imgsize.x * 3);
+    for (y = 0; y < imgsize.y; ++y) {
+        jpeg_read_scanlines (&cinfo, linebuf, 1);
+        if (3 == bytesperpixel) {
+            memcpy(base, *linebuf, lineoffset);
+            base += lineoffset;
+        } else if (1 == bytesperpixel) {
+            for (x = 0; x < imgsize.x; ++x) {
+                memset(base, linebuf[0][x], 3);
                 base += 3;
             }
+        } else {
+            die("The number of color channels is %d."
+                "This program only handles 1 or 3\n", bytesperpixel);
         }
-    } else {
-        die("The number of color channels is %d."
-            "This program only handles 1 or 3\n", bytesPerPix);
     }
+
     jpeg_finish_decompress (&cinfo);
     jpeg_destroy_decompress (&cinfo);
 
     IMG(nodeout).imagebuf = decodebuf;
-    IMG(nodeout).height = height;
-    IMG(nodeout).width = width;
+    IMG(nodeout).size = imgsize;
 }
 
 char *
@@ -229,14 +216,31 @@ readfile(const char *filename, size_t *size) {
 }
 
 Node *
-imagenode(const char *name, char *data, size_t size, Node * parent) {
+pagenode(Node * parent, Node **images, int count) {
+    char *name= strdup("page"), *out;
+    int i;
+    for(i = 0; i < count; i++) {
+        asprintf(&out, "%s,%s", name, images[i]->name);
+        free(name);
+        name = out;
+    }
+    Node *newnode =malloc(sizeof(Node));
+    *newnode = (Node) {
+        .parent = parent, .type = Page, .name = name,
+        .u = { .page = {
+               .count = count,
+               .images = images,
+        }}};
+    return newnode;
+}
+
+Node *
+imagenode(Node * parent, const char *name, char *data, size_t size) {
     //TODO: proper error handling
     Node *newnode = malloc(sizeof(Node));
-    *newnode = (Node){
-        .type = Image,
-        .name = strdup(name),
-        .parent = parent };
-
+    *newnode = (Node){ .type = Image,
+                       .name = strdup(name),
+                       .parent = parent };
     decodejpeg(data, size, newnode);
     free(data);
     return newnode;
@@ -245,44 +249,50 @@ imagenode(const char *name, char *data, size_t size, Node * parent) {
 void
 loadnext(void) {
     char *filename, *data;
-    int count;
+    int i, count, ret;
     size_t size, read;
 
     struct Node *node, *newnode;
     struct archive *a;
     struct archive_entry *entry;
 
-    node = c.curnode;
+    node = curnode;
     switch(node->type) {
     case Image:
-        moveoffset(1);
+    case Page:
+        moveoffset(imageperpage);
         return;
 
     case Archive:
         a = AR(node).a;
-        if(archive_read_next_header(a, &entry) != ARCHIVE_OK)
-            die("Failed to read archive: %s\n", archive_error_string(a));
 
-        if(archive_entry_filetype(entry) & AE_IFDIR) {
-            die("!!!!");
+        Node **images = malloc(sizeof(Node *) * imageperpage);
+        for(i = 0; i < imageperpage; i++) {
+            if((ret = archive_read_next_header(a, &entry)) == ARCHIVE_EOF) {
+                break;
+            } else if(ret != ARCHIVE_OK) {
+                die("Failed to read archive: %s\n", archive_error_string(a));
+            }
+
+            if(archive_entry_filetype(entry) & AE_IFDIR) {
+                ++AR(node).idx;
+                continue;
+            }
+
+            if((size = archive_entry_size(entry)) > IMAGE_SIZE_LIMIT)
+                die("Image size too large");
+
+            data = malloc(size);
+            if((read = archive_read_data(a, data, size)) != size)
+                die("Failed to read whole %ld != %ld, %s, %s, %s\n", read, size,
+                    archive_entry_pathname(entry),
+                    archive_error_string(a), strerror(errno));
+
+            AR(node).entry = entry;
             ++AR(node).idx;
-            return;
+            images[i] = imagenode(node, archive_entry_pathname(entry), data, size);
         }
-
-        size = archive_entry_size(entry);
-        if(size > IMAGE_SIZE_LIMIT)
-            die("Image size too large");
-
-        data = malloc(size);
-        if((read = archive_read_data(a, data, size)) != size)
-            die("Failed to read whole %ld != %ld, %s, %s, %s\n", read, size,
-                archive_entry_pathname(entry),
-                archive_error_string(a), strerror(errno));
-
-        AR(node).entry = entry;
-        ++AR(node).idx;
-        c.curnode = imagenode(archive_entry_pathname(entry),
-            data, size, node);
+        curnode = pagenode(node, images, i);;
         break;
 
     case FileList:
@@ -309,39 +319,44 @@ loadnext(void) {
                     .count = count,
                 }}};
 
-            c.curnode = newnode;
+            curnode = newnode;
             loadnext();
         } else {
             // Cannot open given file as an archive, try to open as a image.
-            data = readfile(filename, &size);
-            if(!data) {
-                printf("Failed to read file: %s", filename);
-                moveoffset(1);
-                loadnext();
-                return;
-            }
+            Node **images = malloc(sizeof(Node *) * imageperpage);
+            for(i = 0; i < imageperpage; i++) {
+                if(FL(node).idx == FL(node).count)
+                    break;
 
-            c.curnode = imagenode(filename, data, size, node);
+                filename = FL(node).filenames[FL(node).idx];
+                if(!(data = readfile(filename, &size)))
+                    die("failed to read file: %s", filename);
+
+                images[i] = imagenode(node, filename, data, size);
+                ++FL(node).idx;
+            }
+            newnode = pagenode(node, images, i);
+            curnode = newnode;
         }
         break;
     }
 }
 
 XImage *
-createimage(Node *node, int target_w, int target_h) {
+createimage(Node *node, vec2 size) {
     unsigned char *buf = IMG(node).imagebuf;
-    int w = IMG(node).width, h = IMG(node).height;
+    int w = IMG(node).size.x, h = IMG(node).size.y;
     XImage *img = NULL;
     int out_idx = 0;
     int x, y, sample_x, sample_y;
     uint32_t *imagebuf;
 
-    imagebuf = malloc(sizeof(uint32_t) * target_w * target_h);
+    imagebuf = malloc(sizeof(uint32_t) * size.x * size.y);
     // Nearest sampling
-    for(y = 0; y < target_h; y++) {
-        sample_y = y * h / target_h * w * 3;
-        for(x = 0; x < target_w; x++) {
-            sample_x = x * w / target_w * 3;
+    for(y = 0; y < size.y; y++) {
+        sample_y = y * h / size.y * w * 3;
+        for(x = 0; x < size.x; x++) {
+            sample_x = x * w / size.x * 3;
             imagebuf[out_idx] = (*(uint32_t*)(buf + sample_y + sample_x)) << 8;
             ++out_idx;
         }
@@ -351,7 +366,7 @@ createimage(Node *node, int target_w, int target_h) {
         CopyFromParent, DefaultDepth(dpy, screen),
         ZPixmap, 0,
         (char *) imagebuf,
-        target_w, target_h,
+        size.x, size.y,
         32, 0
     );
 
@@ -382,104 +397,87 @@ createwindow(Display *dpy, int screen, int x, int y, int w, int h) {
     return win;
 }
 
-void
-gentitle(Node *node, char *buf, size_t size, size_t *outsize) {
-    if(!node) {
-        *outsize = 0;
-        return;
-    }
+char *
+gentitle(Node *node) {
+    if(!node)
+        return strdup("");
 
-    gentitle(node->parent, buf, size, outsize);
-    buf += *outsize;
-    size -= *outsize;
-    switch(node->type) {
-    case Image:
-        *outsize += snprintf(buf, size, "%s", node->name);
-        break;
-    case Archive:
-        *outsize += snprintf(buf, size, "%s [%d/%d] | ", node->name, AR(node).idx + 1, AR(node).count);
-        break;
-    case FileList:
-        *outsize += snprintf(buf, size, "%s [%d/%d] | ", node->name, FL(node).idx + 1, FL(node).count);
-        break;
-    }
+    char *title = NULL, *parenttitle;
+    parenttitle = gentitle(node->parent);
+    if(node->type == Image || node->type == Page)
+        asprintf(&title, "%s %s", parenttitle, node->name);
+    else if(node->type == Archive)
+        asprintf(&title, "%s %s [%d/%d] |", parenttitle, node->name, AR(node).idx + 1, AR(node).count);
+    else if(node->type == FileList)
+        asprintf(&title, "%s %s [%d/%d] |", parenttitle, node->name, FL(node).idx + 1, FL(node).count);
+    free(parenttitle);
+    return title;
 }
 
 void
 render(void) {
-    if(c.img) {
-        XDestroyImage(c.img);
-        c.img = NULL;
-    }
-
-    if(c.curnode->type != Image)
+    if(curnode->type != Page)
         die("BUG: curnode->type != Image on render()");
 
-    int width, height;
-    width = IMG(c.curnode).width;
-    height = IMG(c.curnode).height;
+    XClearArea(dpy, win, 0, 0, 0, 0, False);
 
-    if(!width || !height)
-        return;
+    int i;
+    Node *imgnode;
+    XImage *img;
+    vec2 anchor, imgsize, size = (vec2){.x=0, .y=0};
 
-    double ratio = (double)width / height;
-    double screenRatio = (double)c.screenWidth / c.screenHeight;
-
-    if(ratio > screenRatio) {
-        c.image_width = c.screenWidth;
-        c.image_height = height * c.screenWidth / width;
-    } else {
-        c.image_width = width * c.screenHeight / height;
-        c.image_height = c.screenHeight;
+    for(i = 0; i < PG(curnode).count; i++) {
+        imgnode = PG(curnode).images[i];
+        size.x += IMG(imgnode).size.x;
+        size.y = MAX(IMG(imgnode).size.y, size.y);
     }
 
-    c.img = createimage(c.curnode, c.image_width, c.image_height);
-    if (!c.img)
-        die("Failed to create image\n");
+    double resizeratio;
+    if(vec2_ratio(size) > vec2_ratio(viewsize))
+        resizeratio = (double)viewsize.x / size.x;
+    else
+        resizeratio = (double)viewsize.y / size.y;
 
-    XClearArea(dpy, win, 0, 0, 0, 0, False);
-    XPutImage (dpy, win, gc, c.img, 0, 0,
-        (c.screenWidth - c.image_width) / 2,
-        (c.screenHeight - c.image_height) / 2,
-        c.image_width, c.image_height);
+    anchor = vec2_scale(vec2_add(viewsize, vec2_scale(size, -resizeratio)), .5f);
+    for(i = 0; i < curnode->u.page.count; i++) {
+        imgnode = curnode->u.page.images[i];
+        imgsize = vec2_scale(IMG(imgnode).size, resizeratio);
+        if (!(img = createimage(imgnode, imgsize)))
+            die("Failed to create image\n");
+
+        XPutImage (dpy, win, gc, img, 0, 0, anchor.x, anchor.y, imgsize.x, imgsize.y);
+        anchor.x += imgsize.x;
+        XDestroyImage(img);
+    }
     XFlush (dpy);
 
-    //TODO: recursive title generation
-    size_t writelen;
-    char title[TITLE_LENGTH_LIMIT];
-    gentitle(c.curnode, title, TITLE_LENGTH_LIMIT, &writelen);
+    char *title = gentitle(curnode);
     xsettitle(win, title);
+    free(title);
 }
 
 void
 buttonpress(XEvent *e) {
     int i;
-	XButtonPressedEvent *ev = &e->xbutton;
+    XButtonPressedEvent *ev = &e->xbutton;
 
-	for(i = 0; i < LENGTH(buttons); i++)
-		if(buttons[i].func && buttons[i].button == ev->button
-		&& CLEANMASK(buttons[i].mask) == CLEANMASK(ev->state))
-			buttons[i].func(&buttons[i].arg);
+    for(i = 0; i < LENGTH(buttons); i++)
+        if(buttons[i].func && buttons[i].button == ev->button
+        && CLEANMASK(buttons[i].mask) == CLEANMASK(ev->state))
+            buttons[i].func(&buttons[i].arg);
 }
 
 void
 configurenotify(XEvent *e) {
     XConfigureEvent xce = e->xconfigure;
-
-    if(c.screenWidth != xce.width || c.screenHeight != xce.height) {
-        c.screenWidth = xce.width;
-        c.screenHeight = xce.height;
-        render();
-    }
+    viewsize = (vec2){.x = xce.width, .y = xce.height};
+    render();
 }
 
 void
 expose(XEvent *e) {
-    XExposeEvent *ev = &e->xexpose;
-
-    if(ev->count == 0) {
+    if((&e->xexpose)->count)
         render();
-    }
 }
 
 void
@@ -494,32 +492,29 @@ run(void) {
 
 void
 cleanupnode(Node *node) {
-    switch(node->type) {
-    case Image:
+    int i;
+    if(node->type == Image)
         free(IMG(node).imagebuf);
-        free(node->name);
-        break;
-    case Archive:
+    else if(node->type == Archive)
         archive_read_free(AR(node).a);
-        free(node->name);
-        break;
-    case FileList:
-        break;
+    else if(node->type == Page) {
+        for(i = 0; i < PG(node).count; i++)
+            cleanupnode(PG(node).images[i]);
+        free(PG(node).images);
     }
 
+    free(node->name);
     free(node);
     return;
 }
 
 void
 cleanup(void) {
-    XDestroyImage(c.img);
-
     Node *node;
-    while(c.curnode) {
-        node = c.curnode->parent;
-        cleanupnode(c.curnode);
-        c.curnode = node;
+    while(curnode) {
+        node = curnode->parent;
+        cleanupnode(curnode);
+        curnode = node;
     }
 
     XFreeGC(dpy, gc);
@@ -539,10 +534,12 @@ moveoffset(int offset) {
     struct archive *a;
     struct archive_entry *entry = NULL;
 
-    node = c.curnode;
+    node = curnode;
     switch(node->type) {
     case Image:
-        c.curnode = c.curnode->parent;
+        die("Image on moveoffset()");
+    case Page:
+        curnode = curnode->parent;
         cleanupnode(node);
         return moveoffset(offset);
 
@@ -550,17 +547,18 @@ moveoffset(int offset) {
         a = AR(node).a;
         idx = AR(node).idx;
         if(idx == AR(node).count) {
-            c.curnode = c.curnode->parent;
+            curnode = curnode->parent;
             cleanupnode(node);
             return moveoffset(offset);
         }
 
+        offset -= imageperpage;
         if(offset >= 0) {
             advance = MIN(offset, AR(node).count - idx);
-            while(--advance > 0) {
-                ++idx;
+            while(advance > 0) {
                 if(archive_read_next_header(a, &entry) != ARCHIVE_OK)
                     die("Failed to seek archive");
+                --advance; ++idx;
             }
         } else {
             archive_read_free(a);
@@ -569,24 +567,21 @@ moveoffset(int offset) {
 
             advance = idx + offset;
             idx = 0;
-            while(--advance > 0) {
+            while(advance > 0) {
                 if(archive_read_next_header(a, &entry) != ARCHIVE_OK)
                     die("Failed to seek archive");
-                ++idx;
+                --advance; ++idx;
             }
-            AR(node).a = a;
-        }
-
-        AR(node).idx = idx;
+            AR(node).a = a; } AR(node).idx = idx;
         AR(node).entry = entry;
         break;
 
     case FileList:
-        // BUG: At the end of the file, Same file opened twice.
+        // BUG: At the end of the file, same file opened twice.
         // It does not be a problem if file is an image, but
         // if the last file is an archive, same file is opened twice
         // and seek to position 0
-        FL(node).idx = MIN(MAX(FL(node).idx + offset, 0), FL(node).count - 1);
+        FL(node).idx = MAX(MIN(FL(node).idx + offset - imageperpage, FL(node).count - 1), 0);
         break;
     }
 
@@ -598,6 +593,11 @@ moveoffset(int offset) {
 
 void
 seek(const Arg *arg) {
+    moveoffset(arg->i * imageperpage);
+}
+
+void
+seekabs(const Arg *arg) {
     moveoffset(arg->i);
 }
 
@@ -618,13 +618,13 @@ keypress(XEvent *e) {
 
 void
 xsettitle(Window w, const char *str) {
-	XTextProperty xtp;
+    XTextProperty xtp;
 
-	if(Xutf8TextListToTextProperty(dpy, (char **)&str, 1, XUTF8StringStyle,
-				&xtp) == Success) {
-		XSetTextProperty(dpy, w, &xtp, XA_WM_NAME);
-		XFree(xtp.value);
-	}
+    if(Xutf8TextListToTextProperty(dpy, (char **)&str, 1, XUTF8StringStyle,
+                &xtp) == Success) {
+        XSetTextProperty(dpy, w, &xtp, XA_WM_NAME);
+        XFree(xtp.value);
+    }
 }
 
 struct archive *
@@ -653,14 +653,13 @@ setup(void) {
     XMapRaised(dpy, win);
     XSelectInput(dpy, win, ExposureMask | StructureNotifyMask | KeyPressMask | ButtonPressMask);
 
-    c.curnode = c.node;
     loadnext();
 }
 
 void
 usage(void) {
-	fputs("usage: comic [filename]\n", stderr);
-	exit(EXIT_FAILURE);
+    fputs("usage: comic [-d] [filename]\n", stderr);
+    exit(EXIT_FAILURE);
 }
 
 int
@@ -668,21 +667,25 @@ main(int argc, char *argv[]) {
     /* command line args */
     ARGBEGIN {
     default:
-	case 'n':
-		wmname = EARGF(usage());
+    case 'd':
+        imageperpage = 2;
+        break;
+    case 'n':
+        wmname = EARGF(usage());
         break;
     } ARGEND;
 
     if(argc == 0)
         usage();
 
-    c.node = malloc(sizeof(Node));
-    *c.node = (Node){
+    node = malloc(sizeof(Node));
+    *node = (Node){
         .type = FileList,
-        .name = wmname,
+        .name = strdup(wmname),
         .parent = NULL,
         .u = { .filelist = { .idx = 0, .count = argc, .filenames = argv } }
     };
+    curnode = node;
 
     setup();
     run();

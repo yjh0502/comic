@@ -1,6 +1,5 @@
 Jump to file by filename/index with dmenu
 Multiple image format support: libpng? FreeImage?
-Double-page view
 
 Scaling
  - Scaling polity: width-fit, height-fit, 100%, ...

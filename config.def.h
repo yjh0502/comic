@@ -1,6 +1,4 @@
-
-
-#define ARCHIVE_BLOCK_SIZE  10240
+#define ARCHIVE_BLOCK_SIZE  1024 * 16
 #define IMAGE_SIZE_LIMIT    1000 * 1000 * 10
 #define TITLE_LENGTH_LIMIT  1024
 
@@ -12,6 +10,8 @@ static Key keys[] = {
     { 0,              XK_n,      seek,          {.i = 1 } },
     { 0,              XK_b,      seek,          {.i = -10 } },
     { 0,              XK_f,      seek,          {.i = 10 } },
+    { 0,              XK_comma,  seekabs,       {.i = -1 } },
+    { 0,              XK_period, seekabs,       {.i = 1 } },
 };
 
 static Button buttons[] = {
