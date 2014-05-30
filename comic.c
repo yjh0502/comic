@@ -25,9 +25,16 @@ typedef union {
     int i;
 } Arg;
 
+enum {
+    Left = 1,
+    Right = 2,
+    Any = 3,
+} Side;
+
 typedef struct {
     unsigned int mask;
     unsigned int button;
+    int side;
     void (*func)(const Arg *arg);
     const Arg arg;
 } Button;
@@ -379,22 +386,16 @@ createimage(Node *node, vec2 size) {
 
 Window
 createwindow(Display *dpy, int screen, int x, int y, int w, int h) {
-    Window win;
     XSetWindowAttributes wa;
-
-    wa.border_pixel = BlackPixel (dpy, screen);
-    wa.background_pixel = BlackPixel (dpy, screen);
+    wa.border_pixel = BlackPixel(dpy, screen);
+    wa.background_pixel = BlackPixel(dpy, screen);
     wa.override_redirect = 0;
 
-    win = XCreateWindow (dpy, DefaultRootWindow (dpy),
-        x, y,
-        w, h,
+    return XCreateWindow(dpy, DefaultRootWindow (dpy),
+        x, y, w, h,
         0, DefaultDepth(dpy, screen),
         InputOutput, CopyFromParent,
-        CWBackPixel | CWBorderPixel, &wa
-    );
-
-    return win;
+        CWBackPixel | CWBorderPixel, &wa);
 }
 
 char *
@@ -419,8 +420,6 @@ render(void) {
     if(curnode->type != Page)
         die("BUG: curnode->type != Image on render()");
 
-    XClearArea(dpy, win, 0, 0, 0, 0, False);
-
     int i;
     Node *imgnode;
     XImage *img;
@@ -438,6 +437,7 @@ render(void) {
     else
         resizeratio = (double)viewsize.y / size.y;
 
+    XClearArea(dpy, win, 0, 0, 0, 0, False);
     anchor = vec2_scale(vec2_add(viewsize, vec2_scale(size, -resizeratio)), .5f);
     for(i = 0; i < curnode->u.page.count; i++) {
         imgnode = curnode->u.page.images[i];
@@ -460,10 +460,12 @@ void
 buttonpress(XEvent *e) {
     int i;
     XButtonPressedEvent *ev = &e->xbutton;
+    int side = (ev->x > viewsize.x / 2) + 1;
 
     for(i = 0; i < LENGTH(buttons); i++)
         if(buttons[i].func && buttons[i].button == ev->button
-        && CLEANMASK(buttons[i].mask) == CLEANMASK(ev->state))
+                && CLEANMASK(buttons[i].mask) == CLEANMASK(ev->state)
+                && side & buttons[i].side)
             buttons[i].func(&buttons[i].arg);
 }
 

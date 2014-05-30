@@ -15,6 +15,7 @@ static Key keys[] = {
 };
 
 static Button buttons[] = {
-    /*event mask      button          function        argument */
-    { 0,              Button1,        seek,           {.i = 1 } },
+    /*event mask   button       side      function    argument */
+    { 0,           Button1,     Left,     seek,       {.i = -1 } },
+    { 0,           Button1,     Right,    seek,       {.i = 1 } },
 };
