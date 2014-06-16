@@ -1,13 +1,15 @@
 #include "arg.h"
 
-#include <archive_entry.h>
-#include <archive.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 #include <X11/keysym.h>
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
@@ -60,10 +62,21 @@ static vec2 vec2_scale(vec2 v, double r) { v.x *= r; v.y *= r; return v; }
 static vec2 vec2_add(vec2 v1, vec2 vec2) { v1.x += vec2.x; v1.y += vec2.y; return v1; }
 
 typedef struct Node Node;
+
+typedef Node* (*loadnextfunc)(Node*);
+typedef int (*moveoffsetfunc)(Node*, int);
+typedef char *(*gentitlefunc)(Node*, char *);
+typedef void (*cleanupfunc)(Node*);
+
 struct Node {
     int type;
     char *name;
     Node *parent;
+
+    loadnextfunc loadnext;
+    moveoffsetfunc moveoffset;
+    gentitlefunc gentitle;
+    cleanupfunc cleanup;
 
     union {
         struct {
@@ -76,17 +89,18 @@ struct Node {
         } page;
         struct {
             int idx, count;
-            struct archive *a;
-            struct archive_entry *entry;
-        } archive;
-        struct {
-            int idx, count;
             char * const * filenames;
         } filelist;
+#ifdef ARCHIVE
+        struct {
+            struct archive *a;
+            int idx, count;
+            struct archive_entry *entry;
+        } archive;
+#endif
     } u;
 };
 
-#define AR(node) ((node)->u.archive)
 #define IMG(node) ((node)->u.image)
 #define PG(node) ((node)->u.page)
 #define FL(node) ((node)->u.filelist)
@@ -108,7 +122,6 @@ static char *readfile(const char *filename, size_t *size);
 static int moveoffset(int offset);
 static Node *imagenode(Node * parent, const char *name, char *data, size_t size);
 static Node *pagenode(Node * parent, Node **images, int count);
-static struct archive * openarchive(const char *filename);
 static void cleanupnode(Node *node);
 static void cleanup(void);
 static void decodejpeg(void *buf, size_t size, Node *nodeout);
@@ -133,6 +146,141 @@ static void keypress(XEvent *e);
 
 /* configuration, allows nested code to access above variables */
 #include "config.h"
+
+#ifdef ARCHIVE
+// Archived image support
+#include <archive_entry.h>
+#include <archive.h>
+
+#define AR(node) ((node)->u.archive)
+
+static struct archive *
+openarchive(const char *filename) {
+    struct archive *a = archive_read_new();
+    archive_read_support_filter_all(a);
+    archive_read_support_format_all(a);
+    if(archive_read_open_filename(a, filename, ARCHIVE_BLOCK_SIZE) != ARCHIVE_OK)
+        return NULL;
+    return a;
+}
+
+static Node*
+archiveloadnext(Node *node) {
+    char *data;
+    int i, ret;
+    size_t size, read;
+    struct archive *a = AR(node).a;
+    struct archive_entry *entry;
+
+    Node **images = malloc(sizeof(Node *) * imageperpage);
+    for(i = 0; i < imageperpage; i++) {
+        if((ret = archive_read_next_header(a, &entry)) == ARCHIVE_EOF)
+            break;
+        else if(ret != ARCHIVE_OK)
+            die("Failed to read archive: %s\n", archive_error_string(a));
+
+        if((archive_entry_filetype(entry) & AE_IFDIR) ||
+                (size = archive_entry_size(entry)) > IMAGE_SIZE_LIMIT)
+            continue;
+
+        data = malloc(size);
+        if((read = archive_read_data(a, data, size)) != size)
+            die("Failed to read whole %ld != %ld, %s, %s, %s\n", read, size,
+                archive_entry_pathname(entry),
+                archive_error_string(a), strerror(errno));
+
+        ++AR(node).idx;
+        AR(node).entry = entry;
+        images[i] = imagenode(node, archive_entry_pathname(entry), data, size);
+    }
+
+    return pagenode(node, images, i);;
+}
+
+static int
+archivemoveoffset(Node *node, int offset) {
+    struct archive *a = AR(node).a;
+    struct archive_entry *entry;
+    int advance, idx = AR(node).idx;;
+
+    if(idx == AR(node).count) {
+        return 0;
+    }
+
+    offset -= imageperpage;
+    if(offset > 0) {
+        advance = MIN(offset, AR(node).count - idx);
+        while(advance > 0) {
+            if(archive_read_next_header(a, &entry) != ARCHIVE_OK)
+                die("Failed to seek archive");
+            --advance; ++idx;
+        }
+    } else {
+        archive_read_free(a);
+        // should not fail
+        a = openarchive(node->name);
+
+        advance = idx + offset;
+        idx = 0;
+        while(advance > 0) {
+            if(archive_read_next_header(a, &entry) != ARCHIVE_OK)
+                die("Failed to seek archive");
+            --advance; ++idx;
+        }
+        AR(node).a = a;
+    }
+    AR(node).idx = idx;
+    AR(node).entry = entry;
+
+    return offset;
+}
+
+static char *
+archivegentitle(Node *node, char *parenttitle) {
+    char *title;
+    asprintf(&title, "%s %s [%d/%d] |", parenttitle, node->name, AR(node).idx + 1, AR(node).count);
+    return title;
+}
+
+static void
+archivecleanup(Node *node) {
+    archive_read_free(AR(node).a);
+}
+
+Node *
+archivenode(Node * parent, const char *filename) {
+    Node *node;
+    int count = 0;
+    struct archive *a;
+    struct archive_entry *entry;
+
+    if((a = openarchive(filename)) == NULL)
+        return NULL;
+
+    while(archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+        archive_read_data_skip(a);
+        ++count;
+    }
+    archive_read_free(a);
+
+    node = malloc(sizeof(Node));
+    *node = (Node){
+        .type = Archive,
+        .name = strdup(filename),
+        .parent = parent,
+        .loadnext = archiveloadnext,
+        .moveoffset = archivemoveoffset,
+        .gentitle = archivegentitle,
+        .cleanup = archivecleanup,
+        .u = { .archive = {
+            .a = openarchive(filename),
+            .idx = 0,
+            .count = count,
+        }}};
+    return node;
+}
+#endif
+
 
 static void (*handler[LASTEvent]) (XEvent *) = {
     [ButtonPress] = buttonpress,
@@ -256,12 +404,9 @@ imagenode(Node * parent, const char *name, char *data, size_t size) {
 void
 loadnext(void) {
     char *filename, *data;
-    int i, count, ret;
-    size_t size, read;
-
+    int i;
+    size_t size;
     struct Node *node, *newnode;
-    struct archive *a;
-    struct archive_entry *entry;
 
     node = curnode;
     switch(node->type) {
@@ -270,65 +415,18 @@ loadnext(void) {
         moveoffset(imageperpage);
         return;
 
-    case Archive:
-        a = AR(node).a;
-
-        Node **images = malloc(sizeof(Node *) * imageperpage);
-        for(i = 0; i < imageperpage; i++) {
-            if((ret = archive_read_next_header(a, &entry)) == ARCHIVE_EOF) {
-                break;
-            } else if(ret != ARCHIVE_OK) {
-                die("Failed to read archive: %s\n", archive_error_string(a));
-            }
-
-            if(archive_entry_filetype(entry) & AE_IFDIR) {
-                ++AR(node).idx;
-                continue;
-            }
-
-            if((size = archive_entry_size(entry)) > IMAGE_SIZE_LIMIT)
-                die("Image size too large");
-
-            data = malloc(size);
-            if((read = archive_read_data(a, data, size)) != size)
-                die("Failed to read whole %ld != %ld, %s, %s, %s\n", read, size,
-                    archive_entry_pathname(entry),
-                    archive_error_string(a), strerror(errno));
-
-            AR(node).entry = entry;
-            ++AR(node).idx;
-            images[i] = imagenode(node, archive_entry_pathname(entry), data, size);
-        }
-        curnode = pagenode(node, images, i);;
-        break;
-
     case FileList:
         filename = FL(node).filenames[FL(node).idx];
 
         //TODO: should detect filetype
-        count = 0;
-        a = openarchive(filename);
-        if(a) {
-            while(archive_read_next_header(a, &entry) == ARCHIVE_OK) {
-                archive_read_data_skip(a);
-                ++count;
-            }
-            archive_read_free(a);
-
-            newnode = malloc(sizeof(Node));
-            *newnode = (Node){
-                .type = Archive,
-                .name = strdup(filename),
-                .parent = node,
-                .u = { .archive = {
-                    .a = openarchive(filename),
-                    .idx = 0,
-                    .count = count,
-                }}};
-
+#ifdef ARCHIVE
+        newnode = archivenode(curnode, filename);
+        if(newnode) {
             curnode = newnode;
             loadnext();
-        } else {
+        } else
+#endif
+        {
             // Cannot open given file as an archive, try to open as a image.
             Node **images = malloc(sizeof(Node *) * imageperpage);
             for(i = 0; i < imageperpage; i++) {
@@ -345,6 +443,9 @@ loadnext(void) {
             newnode = pagenode(node, images, i);
             curnode = newnode;
         }
+        break;
+    default:
+        curnode = node->loadnext(node);
         break;
     }
 }
@@ -407,10 +508,11 @@ gentitle(Node *node) {
     parenttitle = gentitle(node->parent);
     if(node->type == Image || node->type == Page)
         asprintf(&title, "%s %s", parenttitle, node->name);
-    else if(node->type == Archive)
-        asprintf(&title, "%s %s [%d/%d] |", parenttitle, node->name, AR(node).idx + 1, AR(node).count);
     else if(node->type == FileList)
         asprintf(&title, "%s %s [%d/%d] |", parenttitle, node->name, FL(node).idx + 1, FL(node).count);
+    else {
+        title = node->gentitle(node, parenttitle);
+    }
     free(parenttitle);
     return title;
 }
@@ -418,7 +520,7 @@ gentitle(Node *node) {
 void
 render(void) {
     if(curnode->type != Page)
-        die("BUG: curnode->type != Image on render()");
+        die("BUG: curnode->type != Page on render(): %d", curnode->type);
 
     int i;
     Node *imgnode;
@@ -497,12 +599,12 @@ cleanupnode(Node *node) {
     int i;
     if(node->type == Image)
         free(IMG(node).imagebuf);
-    else if(node->type == Archive)
-        archive_read_free(AR(node).a);
     else if(node->type == Page) {
         for(i = 0; i < PG(node).count; i++)
             cleanupnode(PG(node).images[i]);
         free(PG(node).images);
+    } else if(node->cleanup) {
+        node->cleanup(node);
     }
 
     free(node->name);
@@ -531,12 +633,7 @@ quit(const Arg *arg) {
 
 int
 moveoffset(int offset) {
-    Node *node;
-    int idx, advance = 0;
-    struct archive *a;
-    struct archive_entry *entry = NULL;
-
-    node = curnode;
+    Node *node = curnode;
     switch(node->type) {
     case Image:
         die("Image on moveoffset()");
@@ -545,38 +642,6 @@ moveoffset(int offset) {
         cleanupnode(node);
         return moveoffset(offset);
 
-    case Archive:
-        a = AR(node).a;
-        idx = AR(node).idx;
-        if(idx == AR(node).count) {
-            curnode = curnode->parent;
-            cleanupnode(node);
-            return moveoffset(offset);
-        }
-
-        offset -= imageperpage;
-        if(offset >= 0) {
-            advance = MIN(offset, AR(node).count - idx);
-            while(advance > 0) {
-                if(archive_read_next_header(a, &entry) != ARCHIVE_OK)
-                    die("Failed to seek archive");
-                --advance; ++idx;
-            }
-        } else {
-            archive_read_free(a);
-            // should not fail
-            a = openarchive(node->name);
-
-            advance = idx + offset;
-            idx = 0;
-            while(advance > 0) {
-                if(archive_read_next_header(a, &entry) != ARCHIVE_OK)
-                    die("Failed to seek archive");
-                --advance; ++idx;
-            }
-            AR(node).a = a; } AR(node).idx = idx;
-        AR(node).entry = entry;
-        break;
 
     case FileList:
         // BUG: At the end of the file, same file opened twice.
@@ -585,11 +650,16 @@ moveoffset(int offset) {
         // and seek to position 0
         FL(node).idx = MAX(MIN(FL(node).idx + offset - imageperpage, FL(node).count - 1), 0);
         break;
+    default:
+        if(node->moveoffset(node, offset) == -1) {
+            curnode = curnode->parent;
+            cleanupnode(node);
+            return moveoffset(offset);
+        }
     }
 
     loadnext();
     render();
-    return advance;
     return 0;
 }
 
@@ -627,19 +697,6 @@ xsettitle(Window w, const char *str) {
         XSetTextProperty(dpy, w, &xtp, XA_WM_NAME);
         XFree(xtp.value);
     }
-}
-
-struct archive *
-openarchive(const char *filename) {
-    struct archive *a;
-    a = archive_read_new();
-    archive_read_support_filter_all(a);
-    archive_read_support_format_all(a);
-
-    if(archive_read_open_filename(a, filename, ARCHIVE_BLOCK_SIZE) != ARCHIVE_OK)
-        return NULL;
-
-    return a;
 }
 
 void

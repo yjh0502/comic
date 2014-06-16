@@ -14,9 +14,9 @@ Minimalistic image viewer for Linux
 
  - `Xlib` for X11
  - `libjpeg` or `libjpeg-turbo` to decode jpeg images
- - `libarchive` to read archived images
+ - (optional) `libarchive` to read archived images
 
-Use `make` to compile, `make install` to install. Please refer `config.mk` to tune compile options.
+Use `make` to compile, `make install` to install. Please refer `config.mk` to tune compile options. Use `make ARCHIVE_SUPPORT=1` if you have libarchive and want to read archived images.
 
 # Run
 
